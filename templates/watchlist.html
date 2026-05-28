@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+{% block title %}Watchlist — StockTrack{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Watchlist</h1>
+    <p class="page-sub">Monitor stocks you're tracking</p>
+  </div>
+  <button class="btn btn-primary btn-sm" onclick="openModal('addWatchModal')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         width="16" height="16">
+      <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+    </svg>
+    Add Stock
+  </button>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2 class="card-title">Tracked Stocks</h2>
+    <span class="card-meta" id="watchCount"></span>
+  </div>
+  <div class="table-wrap">
+    <table class="data-table" id="watchTable">
+      <thead>
+        <tr>
+          <th>Ticker</th>
+          <th>Company</th>
+          <th class="num">Price</th>
+          <th class="num">Change</th>
+          <th class="num">% Change</th>
+          <th class="num">Volume</th>
+          <th class="num">Market Cap</th>
+          <th class="num">52W Range</th>
+          <th class="num">P/E</th>
+          <th class="num">Added</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="watchBody">
+        <tr><td colspan="11" class="loading-cell">Loading watchlist…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Add to Watchlist Modal -->
+<div class="modal-backdrop" id="addWatchModal"
+     onclick="if(event.target===this)closeModal('addWatchModal')">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Add to Watchlist</h2>
+      <button class="modal-close" onclick="closeModal('addWatchModal')">×</button>
+    </div>
+    <form method="post" action="{{ url_for('add_watchlist') }}" class="modal-form">
+      <div class="form-group">
+        <label>Ticker Symbol</label>
+        <input type="text" name="ticker" placeholder="e.g. TSLA"
+               style="text-transform:uppercase" autofocus required />
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" onclick="closeModal('addWatchModal')">
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-primary">Add to Watchlist</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadWatchlist() {
+  const data = await fetch('/api/watchlist/data').then(r => r.json());
+  const body = document.getElementById('watchBody');
+  document.getElementById('watchCount').textContent =
+    data.length + ' stock' + (data.length !== 1 ? 's' : '');
+
+  if (!data.length) {
+    body.innerHTML = `<tr><td colspan="11" class="empty-cell">
+      Your watchlist is empty.
+      <a href="#" onclick="openModal('addWatchModal');return false;">Add a stock</a>
+    </td></tr>`;
+    return;
+  }
+
+  body.innerHTML = data.map(w => {
+    const rangeBar = w.week_52_low && w.week_52_high ? `
+      <div class="range-bar-wrap">
+        <span class="range-val">$${fmtNum(w.week_52_low)}</span>
+        <div class="range-track">
+          <div class="range-fill"
+               style="width:${Math.min(100,((w.price - w.week_52_low)/(w.week_52_high - w.week_52_low)*100).toFixed(1))}%">
+          </div>
+        </div>
+        <span class="range-val">$${fmtNum(w.week_52_high)}</span>
+      </div>
+    ` : '<span class="text-muted">N/A</span>';
+
+    return `
+      <tr>
+        <td><a href="/stock/${w.ticker}" class="ticker-link">${w.ticker}</a></td>
+        <td class="name-cell">${truncate(w.name, 26)}</td>
+        <td class="num">$${fmtNum(w.price)}</td>
+        <td class="num ${w.change >= 0 ? 'text-green' : 'text-red'}">
+          ${w.change >= 0 ? '+' : ''}$${fmtNum(Math.abs(w.change))}
+        </td>
+        <td class="num">
+          <span class="badge ${w.change_pct >= 0 ? 'badge-up' : 'badge-down'}">
+            ${fmtPct(w.change_pct)}
+          </span>
+        </td>
+        <td class="num">${w.volume ? fmtVolume(w.volume) : '—'}</td>
+        <td class="num">${fmtCap(w.market_cap)}</td>
+        <td class="num">${rangeBar}</td>
+        <td class="num">${w.pe_ratio ? w.pe_ratio.toFixed(1) : '—'}</td>
+        <td class="num date-cell">${w.added_at}</td>
+        <td>
+          <form method="post" action="/watchlist/remove/${w.id}"
+                onsubmit="return confirm('Remove ${w.ticker} from watchlist?')">
+            <button type="submit" class="btn-icon btn-danger-ghost" title="Remove">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" width="15" height="15">
+                <line x1="18" y1="6" x2="6" y2="18"/>
+                <line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+          </form>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function fmtVolume(v) {
+  if (!v) return '—';
+  if (v >= 1e9) return (v/1e9).toFixed(1) + 'B';
+  if (v >= 1e6) return (v/1e6).toFixed(1) + 'M';
+  if (v >= 1e3) return (v/1e3).toFixed(0) + 'K';
+  return v.toLocaleString();
+}
+
+function fmtCap(v) {
+  if (!v) return '—';
+  if (v >= 1e12) return '$' + (v/1e12).toFixed(2) + 'T';
+  if (v >= 1e9) return '$' + (v/1e9).toFixed(1) + 'B';
+  if (v >= 1e6) return '$' + (v/1e6).toFixed(0) + 'M';
+  return '$' + v.toLocaleString();
+}
+
+loadWatchlist();
+</script>
+{% endblock %}

@@ -1,0 +1,247 @@
+{% extends "base.html" %}
+{% block title %}Portfolio — StockTrack{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Portfolio</h1>
+    <p class="page-sub">Track your holdings, P&amp;L, and asset allocation</p>
+  </div>
+  <button class="btn btn-primary btn-sm" onclick="openModal('addPositionModal')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         width="16" height="16">
+      <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+    </svg>
+    Add Position
+  </button>
+</div>
+
+<!-- Summary stats -->
+<div class="stats-grid" id="portfolioStats">
+  <div class="stat-card skeleton-card"></div>
+  <div class="stat-card skeleton-card"></div>
+  <div class="stat-card skeleton-card"></div>
+  <div class="stat-card skeleton-card"></div>
+</div>
+
+<!-- Charts + Table -->
+<div class="section-row">
+  <div style="flex:0 0 280px">
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">Allocation</h2>
+      </div>
+      <div class="chart-container-sm">
+        <canvas id="allocationChart"></canvas>
+      </div>
+      <div id="allocationLegend" class="donut-legend"></div>
+    </div>
+  </div>
+  <div style="flex:1">
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">Holdings</h2>
+        <span class="card-meta" id="holdingsCount"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table" id="holdingsTable">
+          <thead>
+            <tr>
+              <th>Ticker</th>
+              <th>Company</th>
+              <th class="num">Shares</th>
+              <th class="num">Avg Cost</th>
+              <th class="num">Price</th>
+              <th class="num">Mkt Value</th>
+              <th class="num">Gain / Loss</th>
+              <th class="num">Day</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="holdingsBody">
+            <tr><td colspan="9" class="loading-cell">Loading positions…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Add Position Modal -->
+<div class="modal-backdrop" id="addPositionModal" onclick="if(event.target===this)closeModal('addPositionModal')">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Add Position</h2>
+      <button class="modal-close" onclick="closeModal('addPositionModal')">×</button>
+    </div>
+    <form method="post" action="{{ url_for('add_position') }}" class="modal-form">
+      <div class="form-group">
+        <label>Ticker Symbol</label>
+        <input type="text" name="ticker" placeholder="e.g. AAPL"
+               style="text-transform:uppercase" required />
+      </div>
+      <div class="form-row-2">
+        <div class="form-group">
+          <label>Shares</label>
+          <input type="number" name="shares" placeholder="e.g. 10"
+                 step="0.0001" min="0.0001" required />
+        </div>
+        <div class="form-group">
+          <label>Avg Cost / Share ($)</label>
+          <input type="number" name="avg_cost" placeholder="e.g. 150.00"
+                 step="0.01" min="0.01" required />
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Notes <span class="form-opt">(optional)</span></label>
+        <input type="text" name="notes" placeholder="e.g. Long-term hold" maxlength="500" />
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" onclick="closeModal('addPositionModal')">
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-primary">Add to Portfolio</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let allocationChart = null;
+
+async function loadPortfolio() {
+  const data = await fetch('/api/portfolio/data').then(r => r.json());
+  renderStats(data);
+  renderTable(data.positions);
+  renderAllocation(data.positions);
+}
+
+function renderStats(d) {
+  const dayGain = d.positions.reduce((s, p) => s + p.day_gain, 0);
+  const dayPct = d.total_value ? dayGain / (d.total_value - dayGain) * 100 : 0;
+  const el = document.getElementById('portfolioStats');
+  el.innerHTML = `
+    <div class="stat-card">
+      <div class="stat-label">Total Value</div>
+      <div class="stat-value">$${fmtNum(d.total_value)}</div>
+      <div class="stat-change neutral">Market value</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Cost Basis</div>
+      <div class="stat-value">$${fmtNum(d.total_cost)}</div>
+      <div class="stat-change neutral">Total invested</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Total Return</div>
+      <div class="stat-value ${d.total_gain >= 0 ? 'text-green' : 'text-red'}">
+        ${d.total_gain >= 0 ? '+' : ''}$${fmtNum(Math.abs(d.total_gain))}
+      </div>
+      <div class="stat-change ${d.total_gain >= 0 ? 'up' : 'down'}">
+        ${fmtPct(d.total_gain_pct)} unrealized
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Today's Gain</div>
+      <div class="stat-value ${dayGain >= 0 ? 'text-green' : 'text-red'}">
+        ${dayGain >= 0 ? '+' : ''}$${fmtNum(Math.abs(dayGain))}
+      </div>
+      <div class="stat-change ${dayGain >= 0 ? 'up' : 'down'}">
+        ${fmtPct(dayPct)} today
+      </div>
+    </div>
+  `;
+}
+
+function renderTable(positions) {
+  const body = document.getElementById('holdingsBody');
+  document.getElementById('holdingsCount').textContent =
+    positions.length + ' position' + (positions.length !== 1 ? 's' : '');
+  if (!positions.length) {
+    body.innerHTML = `<tr><td colspan="9" class="empty-cell">
+      No positions yet. <a href="#" onclick="openModal('addPositionModal');return false;">Add one</a>
+    </td></tr>`;
+    return;
+  }
+  body.innerHTML = positions.map(p => `
+    <tr>
+      <td><a href="/stock/${p.ticker}" class="ticker-link">${p.ticker}</a></td>
+      <td class="name-cell">${truncate(p.name, 24)}</td>
+      <td class="num">${p.shares % 1 ? p.shares.toFixed(4) : p.shares}</td>
+      <td class="num">$${p.avg_cost.toFixed(2)}</td>
+      <td class="num">$${fmtNum(p.current_price)}</td>
+      <td class="num">$${fmtNum(p.market_value)}</td>
+      <td class="num">
+        <span class="${p.gain >= 0 ? 'text-green' : 'text-red'}">
+          ${p.gain >= 0 ? '+' : ''}$${fmtNum(Math.abs(p.gain))}
+        </span>
+        <br/>
+        <small class="${p.gain_pct >= 0 ? 'text-green' : 'text-red'}">
+          ${fmtPct(p.gain_pct)}
+        </small>
+      </td>
+      <td class="num">
+        <span class="${p.day_gain >= 0 ? 'text-green' : 'text-red'}">
+          ${p.day_gain >= 0 ? '+' : ''}$${fmtNum(Math.abs(p.day_gain))}
+        </span>
+      </td>
+      <td>
+        <form method="post" action="/portfolio/remove/${p.id}"
+              onsubmit="return confirm('Remove ${p.ticker} from portfolio?')">
+          <button type="submit" class="btn-icon btn-danger-ghost" title="Remove">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+              <path d="M10 11v6M14 11v6"/>
+            </svg>
+          </button>
+        </form>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function renderAllocation(positions) {
+  const legend = document.getElementById('allocationLegend');
+  if (!positions.length) {
+    legend.innerHTML = '<p class="empty" style="padding:1rem">No positions</p>';
+    return;
+  }
+  const total = positions.reduce((s, p) => s + p.market_value, 0);
+  const colors = ['#6366f1','#06b6d4','#10b981','#f59e0b','#ef4444',
+                  '#8b5cf6','#ec4899','#14b8a6','#f97316','#84cc16'];
+  const labels = positions.map(p => p.ticker);
+  const values = positions.map(p => p.market_value);
+
+  if (allocationChart) allocationChart.destroy();
+  allocationChart = new Chart(document.getElementById('allocationChart'), {
+    type: 'doughnut',
+    data: {
+      labels,
+      datasets: [{ data: values, backgroundColor: colors.slice(0, positions.length),
+                   borderWidth: 2, borderColor: '#151521' }],
+    },
+    options: {
+      cutout: '70%',
+      plugins: { legend: { display: false }, tooltip: {
+        callbacks: {
+          label: ctx => ` ${ctx.label}: $${fmtNum(ctx.raw)} (${(ctx.raw/total*100).toFixed(1)}%)`
+        }
+      }},
+      animation: { duration: 600 },
+    }
+  });
+
+  legend.innerHTML = positions.slice(0, 10).map((p, i) => `
+    <div class="legend-row">
+      <span class="legend-dot" style="background:${colors[i % colors.length]}"></span>
+      <span class="legend-label">${p.ticker}</span>
+      <span class="legend-val">${(p.market_value / total * 100).toFixed(1)}%</span>
+    </div>
+  `).join('');
+}
+
+loadPortfolio();
+</script>
+{% endblock %}

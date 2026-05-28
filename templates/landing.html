@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>StockTrack — Investor Intelligence</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
+        rel="stylesheet"/>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}"/>
+</head>
+<body class="landing-body">
+
+  <header class="landing-nav">
+    <a href="{{ url_for('index') }}" class="brand">
+      <svg class="brand-icon" viewBox="0 0 32 32" fill="none">
+        <rect width="32" height="32" rx="8" fill="url(#lg1)"/>
+        <path d="M8 22 L13 14 L18 18 L23 10" stroke="white" stroke-width="2.5"
+              stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="23" cy="10" r="2" fill="white"/>
+        <defs>
+          <linearGradient id="lg1" x1="0" y1="0" x2="32" y2="32">
+            <stop offset="0%" stop-color="#6366f1"/>
+            <stop offset="100%" stop-color="#06b6d4"/>
+          </linearGradient>
+        </defs>
+      </svg>
+      <span class="brand-name">StockTrack</span>
+    </a>
+    <div class="landing-nav-actions">
+      <a href="{{ url_for('login') }}" class="btn btn-ghost">Sign In</a>
+      <a href="{{ url_for('register') }}" class="btn btn-primary">Get Started</a>
+    </div>
+  </header>
+
+  <section class="landing-hero">
+    <div class="hero-content">
+      <div class="hero-badge">
+        <span class="rgb-dot"></span>
+        All-in-one investor platform
+      </div>
+      <h1 class="hero-title">
+        Track your <span class="rgb-text">portfolio</span><br/>
+        like a professional
+      </h1>
+      <p class="hero-sub">
+        Real-time market data, portfolio analytics, watchlists, sector insights,
+        and news — everything you need to invest with confidence.
+      </p>
+      <div class="hero-actions">
+        <a href="{{ url_for('register') }}" class="btn btn-primary btn-lg">
+          Create Free Account
+        </a>
+        <a href="{{ url_for('login') }}" class="btn btn-ghost btn-lg">
+          Sign In
+        </a>
+      </div>
+    </div>
+    <div class="hero-graphic">
+      <div class="hero-card">
+        <div class="hero-card-header">
+          <span class="hero-ticker">AAPL</span>
+          <span class="badge-up">+2.34%</span>
+        </div>
+        <div class="hero-price">$189.84</div>
+        <div class="hero-sparkline">
+          <svg viewBox="0 0 200 60" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="sparkGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#6366f1" stop-opacity="0.4"/>
+                <stop offset="100%" stop-color="#6366f1" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            <path d="M0 55 L20 50 L40 45 L60 48 L80 38 L100 30 L120 25 L140 20 L160 15 L180 10 L200 5"
+                  fill="none" stroke="#6366f1" stroke-width="2"/>
+            <path d="M0 55 L20 50 L40 45 L60 48 L80 38 L100 30 L120 25 L140 20 L160 15 L180 10 L200 5 L200 60 L0 60Z"
+                  fill="url(#sparkGrad)"/>
+          </svg>
+        </div>
+      </div>
+      <div class="hero-card hero-card-sm hero-card-right">
+        <div class="hero-stat-row">
+          <span class="hero-stat-label">Portfolio Value</span>
+          <span class="hero-stat-val hero-stat-green">$48,231.90</span>
+        </div>
+        <div class="hero-stat-row">
+          <span class="hero-stat-label">Day Gain</span>
+          <span class="hero-stat-val hero-stat-green">+$382.14</span>
+        </div>
+        <div class="hero-stat-row">
+          <span class="hero-stat-label">Total Return</span>
+          <span class="hero-stat-val hero-stat-green">+22.4%</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="landing-features">
+    <h2 class="section-title">Everything an investor needs</h2>
+    <div class="features-grid">
+      <div class="feature-card">
+        <div class="feature-icon" style="background:rgba(99,102,241,0.15)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="1.8">
+            <rect x="3" y="3" width="7" height="7" rx="1"/>
+            <rect x="14" y="3" width="7" height="7" rx="1"/>
+            <rect x="3" y="14" width="7" height="7" rx="1"/>
+            <rect x="14" y="14" width="7" height="7" rx="1"/>
+          </svg>
+        </div>
+        <h3>Live Dashboard</h3>
+        <p>Market indices, top movers, sector performance, and your portfolio
+           summary — all updated in real time.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon" style="background:rgba(16,185,129,0.12)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="1.8">
+            <path d="M3 3h18v4H3zM3 10h18v11H3z"/>
+            <line x1="7" y1="14" x2="7" y2="17"/><line x1="12" y1="13" x2="12" y2="17"/>
+            <line x1="17" y1="15" x2="17" y2="17"/>
+          </svg>
+        </div>
+        <h3>Portfolio Tracking</h3>
+        <p>Track positions, cost basis, unrealized P&amp;L, day gains, and
+           asset allocation with interactive charts.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon" style="background:rgba(6,182,212,0.12)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#06b6d4" stroke-width="1.8">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+          </svg>
+        </div>
+        <h3>Stock Detail &amp; Charts</h3>
+        <p>Price charts across any timeframe, key statistics, analyst ratings,
+           financial metrics, and company news.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon" style="background:rgba(245,158,11,0.12)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="1.8">
+            <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77 5.82 21.02
+                     7 14.14 2 9.27l6.91-1.01L12 2z"/>
+          </svg>
+        </div>
+        <h3>Smart Watchlist</h3>
+        <p>Monitor stocks you're interested in with key metrics — price, change,
+           volume, P/E, and 52-week range at a glance.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon" style="background:rgba(239,68,68,0.12)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="1.8">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M12 6v6l4 2"/>
+          </svg>
+        </div>
+        <h3>Market Overview</h3>
+        <p>Track major indices, sector ETF performance, top gainers and losers,
+           and broad market health indicators.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon" style="background:rgba(139,92,246,0.12)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" stroke-width="1.8">
+            <circle cx="11" cy="11" r="8"/>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+        </div>
+        <h3>Stock Search</h3>
+        <p>Search any ticker or company name instantly. Access full financial
+           profiles, news, and add to your portfolio or watchlist.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="landing-cta">
+    <h2>Start tracking smarter today</h2>
+    <p>Free account. No credit card required.</p>
+    <a href="{{ url_for('register') }}" class="btn btn-primary btn-lg">
+      Create Your Account
+    </a>
+  </section>
+
+  <footer class="landing-footer">
+    <p>© 2025 StockTrack · Market data via Yahoo Finance · For informational purposes only</p>
+  </footer>
+
+</body>
+</html>

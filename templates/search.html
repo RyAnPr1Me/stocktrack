@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}Search — StockTrack{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Search</h1>
+    <p class="page-sub">Find any stock by ticker symbol or company name</p>
+  </div>
+</div>
+
+<div class="card search-card">
+  <div class="search-box-large">
+    <svg class="search-icon-lg" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="2">
+      <circle cx="11" cy="11" r="8"/>
+      <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+    </svg>
+    <input type="text" id="searchInput" placeholder="Enter ticker or company name…"
+           value="{{ query }}" autocomplete="off" autofocus />
+    <button class="btn btn-primary" onclick="doSearch()">Search</button>
+  </div>
+  <div class="search-suggestions">
+    <span class="suggestion-label">Popular:</span>
+    {% for t in ['AAPL','MSFT','GOOGL','AMZN','NVDA','META','TSLA','JPM'] %}
+      <a class="suggestion-chip" href="/stock/{{ t }}">{{ t }}</a>
+    {% endfor %}
+  </div>
+</div>
+
+<div id="searchResults"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const QUERY = '{{ query|replace("'", "\\'") }}';
+let searchTimer = null;
+
+const input = document.getElementById('searchInput');
+
+input.addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(doSearch, 400);
+});
+
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter') doSearch();
+});
+
+async function doSearch() {
+  const q = input.value.trim();
+  const el = document.getElementById('searchResults');
+  if (!q) { el.innerHTML = ''; return; }
+
+  el.innerHTML = '<div class="loading-placeholder">Searching…</div>';
+  const results = await fetch('/api/search?q=' + encodeURIComponent(q)).then(r => r.json());
+
+  if (!results.length) {
+    el.innerHTML = `
+      <div class="card">
+        <div class="empty-state">
+          <p>No results for "<strong>${q}</strong>".</p>
+          <p class="text-muted">Try a different ticker symbol or check the spelling.</p>
+        </div>
+      </div>`;
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">Results for "${q}"</h2>
+        <span class="card-meta">${results.length} found</span>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Ticker</th>
+              <th>Company</th>
+              <th>Sector</th>
+              <th>Exchange</th>
+              <th class="num">Price</th>
+              <th class="num">Change</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${results.map(r => `
+              <tr>
+                <td><a href="/stock/${r.ticker}" class="ticker-link">${r.ticker}</a></td>
+                <td class="name-cell">${r.name || '—'}</td>
+                <td><span class="sector-pill-sm">${r.sector || '—'}</span></td>
+                <td class="text-muted">${r.exchange || '—'}</td>
+                <td class="num">$${fmtNum(r.price)}</td>
+                <td class="num">
+                  <span class="badge ${r.change_pct >= 0 ? 'badge-up' : 'badge-down'}">
+                    ${fmtPct(r.change_pct)}
+                  </span>
+                </td>
+                <td>
+                  <a href="/stock/${r.ticker}" class="btn btn-ghost btn-xs">
+                    View →
+                  </a>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+if (QUERY) doSearch();
+</script>
+{% endblock %}

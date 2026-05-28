@@ -1,0 +1,271 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — StockTrack{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Dashboard</h1>
+    <p class="page-sub" id="lastUpdated">Loading market data…</p>
+  </div>
+  <button class="btn btn-ghost btn-sm" onclick="loadDashboard()">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+      <polyline points="23 4 23 10 17 10"/>
+      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+    </svg>
+    Refresh
+  </button>
+</div>
+
+<!-- Summary cards -->
+<div class="stats-grid" id="statsGrid">
+  <div class="stat-card skeleton-card"></div>
+  <div class="stat-card skeleton-card"></div>
+  <div class="stat-card skeleton-card"></div>
+  <div class="stat-card skeleton-card"></div>
+</div>
+
+<!-- Market indices -->
+<div class="section-row">
+  <div class="section-half">
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">Market Indices</h2>
+      </div>
+      <div id="indicesTable" class="indices-list loading-placeholder">Loading…</div>
+    </div>
+  </div>
+  <div class="section-half">
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">Sector Performance</h2>
+      </div>
+      <div id="sectorBars" class="sector-bars loading-placeholder">Loading…</div>
+    </div>
+  </div>
+</div>
+
+<!-- Movers -->
+<div class="section-row">
+  <div class="section-half">
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">
+          <span class="badge-dot badge-green"></span> Top Gainers
+        </h2>
+      </div>
+      <div id="gainersList" class="movers-list loading-placeholder">Loading…</div>
+    </div>
+  </div>
+  <div class="section-half">
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">
+          <span class="badge-dot badge-red"></span> Top Losers
+        </h2>
+      </div>
+      <div id="losersList" class="movers-list loading-placeholder">Loading…</div>
+    </div>
+  </div>
+</div>
+
+<!-- Portfolio quick view + Watchlist quick view -->
+<div class="section-row">
+  <div class="section-half">
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">Your Portfolio</h2>
+        <a href="{{ url_for('portfolio') }}" class="card-link">View all →</a>
+      </div>
+      <div id="portfolioQuick" class="loading-placeholder">Loading…</div>
+    </div>
+  </div>
+  <div class="section-half">
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">Watchlist</h2>
+        <a href="{{ url_for('watchlist') }}" class="card-link">View all →</a>
+      </div>
+      <div id="watchlistQuick" class="loading-placeholder">Loading…</div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const DATA = {};
+
+async function loadDashboard() {
+  try {
+    const [summary, sectors, movers, portfolio, watchlist] = await Promise.all([
+      fetch('/api/dashboard/summary').then(r => r.json()),
+      fetch('/api/market/sectors').then(r => r.json()),
+      fetch('/api/market/movers').then(r => r.json()),
+      fetch('/api/portfolio/data').then(r => r.json()),
+      fetch('/api/watchlist/data').then(r => r.json()),
+    ]);
+
+    renderStats(summary);
+    renderIndices(summary.indices);
+    renderSectors(sectors);
+    renderMovers(movers);
+    renderPortfolioQuick(portfolio);
+    renderWatchlistQuick(watchlist);
+
+    document.getElementById('lastUpdated').textContent =
+      'Last updated ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    console.error('Dashboard load error:', e);
+  }
+}
+
+function renderStats(s) {
+  const grid = document.getElementById('statsGrid');
+  const portfolioDir = s.portfolio_day_gain >= 0;
+  grid.innerHTML = `
+    <div class="stat-card">
+      <div class="stat-label">Portfolio Value</div>
+      <div class="stat-value">$${fmtNum(s.portfolio_value)}</div>
+      <div class="stat-change ${portfolioDir ? 'up' : 'down'}">
+        ${portfolioDir ? '▲' : '▼'} $${fmtNum(Math.abs(s.portfolio_day_gain))}
+        (${fmtPct(s.portfolio_day_gain_pct)}) today
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Positions</div>
+      <div class="stat-value">${s.position_count}</div>
+      <div class="stat-change neutral">Holdings</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Watchlist</div>
+      <div class="stat-value">${s.watchlist_count}</div>
+      <div class="stat-change neutral">Stocks tracked</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">S&P 500</div>
+      <div class="stat-value">${s.indices.length > 0 ? '$' + fmtNum(s.indices[0].price) : '—'}</div>
+      <div class="stat-change ${s.indices.length > 0 && s.indices[0].change_pct >= 0 ? 'up' : 'down'}">
+        ${s.indices.length > 0 ? fmtPct(s.indices[0].change_pct) + ' today' : ''}
+      </div>
+    </div>
+  `;
+}
+
+function renderIndices(indices) {
+  const el = document.getElementById('indicesTable');
+  if (!indices || !indices.length) { el.innerHTML = '<p class="empty">No data</p>'; return; }
+  el.innerHTML = indices.map(i => `
+    <div class="index-row">
+      <div class="index-info">
+        <span class="index-name">${i.name}</span>
+        <span class="index-ticker">${i.ticker}</span>
+      </div>
+      <div class="index-nums">
+        <span class="index-price">$${fmtNum(i.price)}</span>
+        <span class="badge ${i.change_pct >= 0 ? 'badge-up' : 'badge-down'}">
+          ${fmtPct(i.change_pct)}
+        </span>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderSectors(sectors) {
+  const el = document.getElementById('sectorBars');
+  if (!sectors || !sectors.length) { el.innerHTML = '<p class="empty">No data</p>'; return; }
+  const max = Math.max(...sectors.map(s => Math.abs(s.change_pct)));
+  el.innerHTML = sectors.map(s => {
+    const pct = s.change_pct;
+    const w = max > 0 ? Math.abs(pct) / max * 100 : 0;
+    const dir = pct >= 0 ? 'up' : 'down';
+    return `
+      <div class="sector-bar-row">
+        <span class="sector-name">${s.name}</span>
+        <div class="sector-bar-wrap">
+          <div class="sector-bar sector-bar-${dir}" style="width:${w}%"></div>
+        </div>
+        <span class="sector-pct ${dir}">${fmtPct(pct)}</span>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderMovers(data) {
+  const render = (list, el) => {
+    el.innerHTML = list.map(s => `
+      <a class="mover-row" href="/stock/${s.ticker}">
+        <div class="mover-left">
+          <span class="mover-ticker">${s.ticker}</span>
+          <span class="mover-name">${truncate(s.name, 22)}</span>
+        </div>
+        <div class="mover-right">
+          <span class="mover-price">$${fmtNum(s.price)}</span>
+          <span class="badge ${s.change_pct >= 0 ? 'badge-up' : 'badge-down'}">
+            ${fmtPct(s.change_pct)}
+          </span>
+        </div>
+      </a>
+    `).join('');
+  };
+  render(data.gainers || [], document.getElementById('gainersList'));
+  render(data.losers || [], document.getElementById('losersList'));
+}
+
+function renderPortfolioQuick(p) {
+  const el = document.getElementById('portfolioQuick');
+  if (!p.positions || p.positions.length === 0) {
+    el.innerHTML = `
+      <div class="empty-state">
+        <p>No positions yet.</p>
+        <a href="/portfolio" class="btn btn-primary btn-sm">Add your first stock</a>
+      </div>`;
+    return;
+  }
+  const top = p.positions.slice(0, 5);
+  el.innerHTML = top.map(pos => `
+    <a class="mover-row" href="/stock/${pos.ticker}">
+      <div class="mover-left">
+        <span class="mover-ticker">${pos.ticker}</span>
+        <span class="mover-name">${pos.shares}sh @ $${pos.avg_cost.toFixed(2)}</span>
+      </div>
+      <div class="mover-right">
+        <span class="mover-price">$${fmtNum(pos.market_value)}</span>
+        <span class="badge ${pos.gain_pct >= 0 ? 'badge-up' : 'badge-down'}">
+          ${fmtPct(pos.gain_pct)}
+        </span>
+      </div>
+    </a>
+  `).join('');
+}
+
+function renderWatchlistQuick(wl) {
+  const el = document.getElementById('watchlistQuick');
+  if (!wl || wl.length === 0) {
+    el.innerHTML = `
+      <div class="empty-state">
+        <p>Your watchlist is empty.</p>
+        <a href="/watchlist" class="btn btn-primary btn-sm">Add stocks to watch</a>
+      </div>`;
+    return;
+  }
+  el.innerHTML = wl.slice(0, 5).map(w => `
+    <a class="mover-row" href="/stock/${w.ticker}">
+      <div class="mover-left">
+        <span class="mover-ticker">${w.ticker}</span>
+        <span class="mover-name">${truncate(w.name, 22)}</span>
+      </div>
+      <div class="mover-right">
+        <span class="mover-price">$${fmtNum(w.price)}</span>
+        <span class="badge ${w.change_pct >= 0 ? 'badge-up' : 'badge-down'}">
+          ${fmtPct(w.change_pct)}
+        </span>
+      </div>
+    </a>
+  `).join('');
+}
+
+loadDashboard();
+// Refresh every 60 seconds
+setInterval(loadDashboard, 60000);
+</script>
+{% endblock %}
