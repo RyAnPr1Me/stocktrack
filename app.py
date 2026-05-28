@@ -1,7 +1,7 @@
 import os
 import re
 import threading
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
@@ -35,7 +35,7 @@ login_manager.login_message = 'Please sign in to continue.'
 login_manager.login_message_category = 'warning'
 
 # ── In-memory cache ───────────────────────────────────────────────────────────
-_cache: dict = {}
+_cache: OrderedDict[str, dict] = OrderedDict()
 _lock = threading.Lock()
 CACHE_MAX_ITEMS = 1500
 CACHE_TRIM_TO = 1200
@@ -46,7 +46,7 @@ TTL_QUOTE_MEDIUM = 180
 TTL_QUOTE_SLOW = 600
 
 TICKER_PATTERN = re.compile(r'^[A-Z0-9.\-^]{1,12}$')
-MINIMUM_SHARE_THRESHOLD = 1e-8
+MINIMUM_SHARE_THRESHOLD = 1e-4
 
 
 def _utc_now():
@@ -59,6 +59,7 @@ def cache_get(key: str, ttl: int = 60):
         if entry:
             age = (_utc_now() - entry['ts']).total_seconds()
             if age < ttl:
+                _cache.move_to_end(key)
                 return entry['data']
             _cache.pop(key, None)
     return None
@@ -67,10 +68,10 @@ def cache_get(key: str, ttl: int = 60):
 def cache_set(key: str, data):
     with _lock:
         _cache[key] = {'data': data, 'ts': _utc_now()}
+        _cache.move_to_end(key)
         if len(_cache) > CACHE_MAX_ITEMS:
-            oldest_keys = sorted(_cache.keys(), key=lambda k: _cache[k]['ts'])[:max(0, len(_cache) - CACHE_TRIM_TO)]
-            for old_key in oldest_keys:
-                _cache.pop(old_key, None)
+            while len(_cache) > CACHE_TRIM_TO:
+                _cache.popitem(last=False)
 
 
 def _normalize_ticker(ticker: str) -> str | None:
