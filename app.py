@@ -13,7 +13,15 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 # ── App ────────────────────────────────────────────────────────────────────────
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-CHANGE-IN-PROD')
+_secret_key = os.environ.get('SECRET_KEY', '')
+_debug_mode = os.environ.get('FLASK_DEBUG', '0') == '1'
+if not _secret_key:
+    if _debug_mode:
+        _secret_key = 'dev-secret-do-not-use-in-production'
+    else:
+        raise RuntimeError('SECRET_KEY environment variable must be set in production. '
+                           'Set FLASK_DEBUG=1 to run in development mode.')
+app.config['SECRET_KEY'] = _secret_key
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///stocktrack.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
@@ -328,10 +336,6 @@ def login():
         if user and user.check_password(password):
             login_user(user, remember=remember)
             flash(f'Welcome back, {user.username}!', 'success')
-            next_page = request.args.get('next', '')
-            # Validate next is a relative path to prevent open redirect
-            if next_page and next_page.startswith('/') and not next_page.startswith('//'):
-                return redirect(next_page)
             return redirect(url_for('dashboard'))
         flash('Invalid username or password.', 'error')
     return render_template('login.html')
@@ -716,5 +720,4 @@ with app.app_context():
     db.create_all()
 
 if __name__ == '__main__':
-    debug = os.environ.get('FLASK_DEBUG', '0') == '1'
-    app.run(debug=debug, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    app.run(debug=_debug_mode, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))

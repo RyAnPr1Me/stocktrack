@@ -788,7 +788,6 @@ a:hover { color: var(--accent-hover); }
 }
 
 /* News */
-.news-list { }
 .news-item {
   display: block; padding: 14px 20px;
   border-bottom: 1px solid var(--border);
