@@ -1,6 +1,6 @@
 import os
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import yfinance as yf
@@ -40,7 +40,7 @@ def cache_get(key: str, ttl: int = 60):
     with _lock:
         entry = _cache.get(key)
         if entry:
-            age = (datetime.utcnow() - entry['ts']).total_seconds()
+            age = (datetime.now(timezone.utc) - entry['ts']).total_seconds()
             if age < ttl:
                 return entry['data']
     return None
@@ -48,7 +48,7 @@ def cache_get(key: str, ttl: int = 60):
 
 def cache_set(key: str, data):
     with _lock:
-        _cache[key] = {'data': data, 'ts': datetime.utcnow()}
+        _cache[key] = {'data': data, 'ts': datetime.now(timezone.utc)}
 
 
 # ── Models ─────────────────────────────────────────────────────────────────────
@@ -57,7 +57,7 @@ class User(UserMixin, db.Model):
     username = db.Column(db.String(80), unique=True, nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(255), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     positions = db.relationship('Position', backref='user', lazy=True,
                                 cascade='all, delete-orphan')
     watchlist = db.relationship('WatchlistItem', backref='user', lazy=True,
@@ -76,7 +76,7 @@ class Position(db.Model):
     ticker = db.Column(db.String(10), nullable=False)
     shares = db.Column(db.Float, nullable=False)
     avg_cost = db.Column(db.Float, nullable=False)
-    added_at = db.Column(db.DateTime, default=datetime.utcnow)
+    added_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     notes = db.Column(db.String(500))
 
 
@@ -84,7 +84,7 @@ class WatchlistItem(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     ticker = db.Column(db.String(10), nullable=False)
-    added_at = db.Column(db.DateTime, default=datetime.utcnow)
+    added_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     __table_args__ = (db.UniqueConstraint('user_id', 'ticker'),)
 
 
