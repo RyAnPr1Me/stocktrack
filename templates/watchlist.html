@@ -34,12 +34,13 @@
           <th class="num">Market Cap</th>
           <th class="num">52W Range</th>
           <th class="num">P/E</th>
+          <th class="num">Alerts</th>
           <th class="num">Added</th>
           <th></th>
         </tr>
       </thead>
       <tbody id="watchBody">
-        <tr><td colspan="11" class="loading-cell">Loading watchlist…</td></tr>
+        <tr><td colspan="12" class="loading-cell">Loading watchlist…</td></tr>
       </tbody>
     </table>
   </div>
@@ -68,25 +69,73 @@
     </form>
   </div>
 </div>
+
+<div class="modal-backdrop" id="addAlertModal"
+     onclick="if(event.target===this)closeModal('addAlertModal')">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Add Price Alert</h2>
+      <button class="modal-close" onclick="closeModal('addAlertModal')">×</button>
+    </div>
+    <form method="post" action="{{ url_for('add_alert') }}" class="modal-form">
+      <input type="hidden" name="next" value="{{ url_for('watchlist') }}" />
+      <div class="form-group">
+        <label>Ticker</label>
+        <input type="text" name="ticker" id="alertTickerInput" required />
+      </div>
+      <div class="form-row-2">
+        <div class="form-group">
+          <label>Direction</label>
+          <select name="direction" id="alertDirectionInput" required>
+            <option value="above">Above</option>
+            <option value="below">Below</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Target Price</label>
+          <input type="number" name="target_price" id="alertPriceInput" step="0.01" min="0.01" required />
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" onclick="closeModal('addAlertModal')">Cancel</button>
+        <button type="submit" class="btn btn-primary">Create Alert</button>
+      </div>
+    </form>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
 async function loadWatchlist() {
-  const data = await fetch('/api/watchlist/data').then(r => r.json());
+  const payload = await fetch('/api/watchlist/data').then(r => r.json());
+  const data = payload.items || [];
   const body = document.getElementById('watchBody');
   document.getElementById('watchCount').textContent =
     data.length + ' stock' + (data.length !== 1 ? 's' : '');
 
   if (!data.length) {
-    body.innerHTML = `<tr><td colspan="11" class="empty-cell">
+    body.innerHTML = `<tr><td colspan="12" class="empty-cell">
       Your watchlist is empty.
       <a href="#" onclick="openModal('addWatchModal');return false;">Add a stock</a>
     </td></tr>`;
     return;
   }
 
-  body.innerHTML = data.map(w => {
+  const triggered = payload.triggered_alerts || [];
+  if (triggered.length) {
+    const summary = triggered.map(a => `${a.ticker} (${a.direction} $${fmtNum(a.target_price)})`).join(', ');
+    const container = document.createElement('div');
+    container.className = 'flash info';
+    container.textContent = `Triggered alerts: ${summary}`;
+    document.querySelector('.page-header')?.after(container);
+    setTimeout(() => container.remove(), 5000);
+  }
+
+  body.innerHTML = '';
+  const chunks = [];
+  for (let i = 0; i < data.length; i += 20) chunks.push(data.slice(i, i + 20));
+  renderRowsInChunks(chunks, body, rows => rows.map(w => {
     const rangeBar = w.week_52_low && w.week_52_high ? `
       <div class="range-bar-wrap">
         <span class="range-val">$${fmtNum(w.week_52_low)}</span>
@@ -116,8 +165,12 @@ async function loadWatchlist() {
         <td class="num">${fmtCap(w.market_cap)}</td>
         <td class="num">${rangeBar}</td>
         <td class="num">${w.pe_ratio ? w.pe_ratio.toFixed(1) : '—'}</td>
+        <td class="num">
+          ${renderAlertCell(w)}
+        </td>
         <td class="num date-cell">${w.added_at}</td>
         <td>
+          <button type="button" class="btn btn-ghost btn-xs" onclick="openAlertModal('${w.ticker}', ${w.price})">Alert</button>
           <form method="post" action="/watchlist/remove/${w.id}"
                 onsubmit="return confirm('Remove ${w.ticker} from watchlist?')">
             <button type="submit" class="btn-icon btn-danger-ghost" title="Remove">
@@ -131,7 +184,26 @@ async function loadWatchlist() {
         </td>
       </tr>
     `;
-  }).join('');
+  }).join(''));
+}
+
+function renderAlertCell(w) {
+  const alerts = w.alerts || [];
+  if (!alerts.length) return '<span class="text-muted">—</span>';
+  return alerts.map(a => `<span class="badge ${a.direction === 'above' ? 'badge-up' : 'badge-down'}">${a.direction} $${fmtNum(a.target_price)}</span>`).join('<br/>');
+}
+
+function openAlertModal(ticker, price) {
+  document.getElementById('alertTickerInput').value = ticker || '';
+  document.getElementById('alertPriceInput').value = price ? Number(price).toFixed(2) : '';
+  document.getElementById('alertDirectionInput').value = 'above';
+  openModal('addAlertModal');
+}
+
+function renderRowsInChunks(chunks, body, renderFn, index = 0) {
+  if (index >= chunks.length) return;
+  body.insertAdjacentHTML('beforeend', renderFn(chunks[index]));
+  requestAnimationFrame(() => renderRowsInChunks(chunks, body, renderFn, index + 1));
 }
 
 function fmtVolume(v) {

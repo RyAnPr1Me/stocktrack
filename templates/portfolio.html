@@ -53,13 +53,14 @@
               <th class="num">Avg Cost</th>
               <th class="num">Price</th>
               <th class="num">Mkt Value</th>
+              <th class="num">Weight</th>
               <th class="num">Gain / Loss</th>
               <th class="num">Day</th>
               <th></th>
             </tr>
           </thead>
           <tbody id="holdingsBody">
-            <tr><td colspan="9" class="loading-cell">Loading positions…</td></tr>
+            <tr><td colspan="10" class="loading-cell">Loading positions…</td></tr>
           </tbody>
         </table>
       </div>
@@ -105,6 +106,35 @@
     </form>
   </div>
 </div>
+
+<div class="modal-backdrop" id="sellPositionModal" onclick="if(event.target===this)closeModal('sellPositionModal')">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Record Sale</h2>
+      <button class="modal-close" onclick="closeModal('sellPositionModal')">×</button>
+    </div>
+    <form method="post" id="sellForm" class="modal-form">
+      <div class="form-group">
+        <label>Ticker</label>
+        <input type="text" id="sellTicker" disabled />
+      </div>
+      <div class="form-row-2">
+        <div class="form-group">
+          <label>Shares to Sell</label>
+          <input type="number" name="shares" id="sellShares" step="0.0001" min="0.0001" required />
+        </div>
+        <div class="form-group">
+          <label>Sale Price</label>
+          <input type="number" name="price" id="sellPrice" step="0.01" min="0.01" required />
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" onclick="closeModal('sellPositionModal')">Cancel</button>
+        <button type="submit" class="btn btn-primary">Record Sale</button>
+      </div>
+    </form>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -119,8 +149,9 @@ async function loadPortfolio() {
 }
 
 function renderStats(d) {
-  const dayGain = d.positions.reduce((s, p) => s + p.day_gain, 0);
-  const dayPct = d.total_value ? dayGain / (d.total_value - dayGain) * 100 : 0;
+  const analytics = d.analytics || {};
+  const dayGain = analytics.day_gain || 0;
+  const dayPct = analytics.day_gain_pct || 0;
   const el = document.getElementById('portfolioStats');
   el.innerHTML = `
     <div class="stat-card">
@@ -134,7 +165,7 @@ function renderStats(d) {
       <div class="stat-change neutral">Total invested</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Total Return</div>
+      <div class="stat-label">Unrealized Return</div>
       <div class="stat-value ${d.total_gain >= 0 ? 'text-green' : 'text-red'}">
         ${d.total_gain >= 0 ? '+' : ''}$${fmtNum(Math.abs(d.total_gain))}
       </div>
@@ -143,12 +174,12 @@ function renderStats(d) {
       </div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Today's Gain</div>
-      <div class="stat-value ${dayGain >= 0 ? 'text-green' : 'text-red'}">
-        ${dayGain >= 0 ? '+' : ''}$${fmtNum(Math.abs(dayGain))}
+      <div class="stat-label">Realized P&amp;L</div>
+      <div class="stat-value ${(analytics.realized_gain || 0) >= 0 ? 'text-green' : 'text-red'}">
+        ${(analytics.realized_gain || 0) >= 0 ? '+' : ''}$${fmtNum(Math.abs(analytics.realized_gain || 0))}
       </div>
       <div class="stat-change ${dayGain >= 0 ? 'up' : 'down'}">
-        ${fmtPct(dayPct)} today
+        ${fmtPct(dayPct)} today · total $${fmtNum(analytics.total_return || 0)}
       </div>
     </div>
   `;
@@ -159,12 +190,15 @@ function renderTable(positions) {
   document.getElementById('holdingsCount').textContent =
     positions.length + ' position' + (positions.length !== 1 ? 's' : '');
   if (!positions.length) {
-    body.innerHTML = `<tr><td colspan="9" class="empty-cell">
+    body.innerHTML = `<tr><td colspan="10" class="empty-cell">
       No positions yet. <a href="#" onclick="openModal('addPositionModal');return false;">Add one</a>
     </td></tr>`;
     return;
   }
-  body.innerHTML = positions.map(p => `
+  body.innerHTML = '';
+  const chunks = [];
+  for (let i = 0; i < positions.length; i += 20) chunks.push(positions.slice(i, i + 20));
+  renderRowsInChunks(chunks, body, rows => rows.map(p => `
     <tr>
       <td><a href="/stock/${p.ticker}" class="ticker-link">${p.ticker}</a></td>
       <td class="name-cell">${truncate(p.name, 24)}</td>
@@ -172,13 +206,14 @@ function renderTable(positions) {
       <td class="num">$${p.avg_cost.toFixed(2)}</td>
       <td class="num">$${fmtNum(p.current_price)}</td>
       <td class="num">$${fmtNum(p.market_value)}</td>
+      <td class="num">${fmtPct(p.contribution_pct || 0)}</td>
       <td class="num">
         <span class="${p.gain >= 0 ? 'text-green' : 'text-red'}">
           ${p.gain >= 0 ? '+' : ''}$${fmtNum(Math.abs(p.gain))}
         </span>
         <br/>
         <small class="${p.gain_pct >= 0 ? 'text-green' : 'text-red'}">
-          ${fmtPct(p.gain_pct)}
+          ${fmtPct(p.gain_pct)} · ${fmtPct(p.gain_contribution_pct || 0)} contrib
         </small>
       </td>
       <td class="num">
@@ -187,6 +222,7 @@ function renderTable(positions) {
         </span>
       </td>
       <td>
+        <button type="button" class="btn btn-ghost btn-xs" onclick="openSellModal(${p.id}, '${p.ticker}', ${p.shares}, ${p.current_price})">Sell</button>
         <form method="post" action="/portfolio/remove/${p.id}"
               onsubmit="return confirm('Remove ${p.ticker} from portfolio?')">
           <button type="submit" class="btn-icon btn-danger-ghost" title="Remove">
@@ -199,7 +235,24 @@ function renderTable(positions) {
         </form>
       </td>
     </tr>
-  `).join('');
+  `).join(''));
+}
+
+function renderRowsInChunks(chunks, body, renderFn, index = 0) {
+  if (index >= chunks.length) return;
+  body.insertAdjacentHTML('beforeend', renderFn(chunks[index]));
+  requestAnimationFrame(() => renderRowsInChunks(chunks, body, renderFn, index + 1));
+}
+
+function openSellModal(positionId, ticker, maxShares, currentPrice) {
+  const form = document.getElementById('sellForm');
+  form.action = `/portfolio/sell/${positionId}`;
+  document.getElementById('sellTicker').value = ticker;
+  const sharesInput = document.getElementById('sellShares');
+  sharesInput.value = '';
+  sharesInput.max = maxShares;
+  document.getElementById('sellPrice').value = Number(currentPrice).toFixed(2);
+  openModal('sellPositionModal');
 }
 
 function renderAllocation(positions) {

@@ -288,43 +288,46 @@ async function loadChart(period) {
   if (data.error) return;
 
   const ctx = document.getElementById('priceChart').getContext('2d');
-  if (priceChart) priceChart.destroy();
 
   const first = data.close[0];
   const last = data.close[data.close.length - 1];
   const up = last >= first;
   const color = up ? '#10b981' : '#ef4444';
 
-  if (currentType === 'bar') {
-    priceChart = new Chart(ctx, {
-      type: 'bar',
-      data: {
-        labels: data.labels,
-        datasets: [{ label: 'Volume', data: data.volume,
-                     backgroundColor: up ? 'rgba(16,185,129,0.4)' : 'rgba(239,68,68,0.4)',
-                     borderRadius: 2 }],
-      },
-      options: chartOpts('Volume'),
-    });
-  } else {
-    priceChart = new Chart(ctx, {
-      type: 'line',
-      data: {
-        labels: data.labels,
-        datasets: [{
-          label: TICKER,
-          data: data.close,
-          borderColor: color,
-          backgroundColor: up ? 'rgba(16,185,129,0.08)' : 'rgba(239,68,68,0.08)',
-          borderWidth: 2,
-          fill: true,
-          pointRadius: 0,
-          tension: 0.3,
-        }],
-      },
-      options: chartOpts('Price ($)'),
-    });
+  const desiredType = currentType === 'bar' ? 'bar' : 'line';
+  const nextLabels = data.labels;
+  const nextDataset = desiredType === 'bar'
+    ? {
+      label: 'Volume',
+      data: data.volume,
+      backgroundColor: up ? 'rgba(16,185,129,0.4)' : 'rgba(239,68,68,0.4)',
+      borderRadius: 2,
+    }
+    : {
+      label: TICKER,
+      data: data.close,
+      borderColor: color,
+      backgroundColor: up ? 'rgba(16,185,129,0.08)' : 'rgba(239,68,68,0.08)',
+      borderWidth: 2,
+      fill: true,
+      pointRadius: 0,
+      tension: 0.3,
+    };
+
+  if (priceChart && priceChart.config.type === desiredType) {
+    priceChart.data.labels = nextLabels;
+    priceChart.data.datasets[0] = nextDataset;
+    priceChart.options = chartOpts(desiredType === 'bar' ? 'Volume' : 'Price ($)');
+    priceChart.update();
+    return;
   }
+
+  if (priceChart) priceChart.destroy();
+  priceChart = new Chart(ctx, {
+    type: desiredType,
+    data: { labels: nextLabels, datasets: [nextDataset] },
+    options: chartOpts(desiredType === 'bar' ? 'Volume' : 'Price ($)'),
+  });
 }
 
 function chartOpts(label) {

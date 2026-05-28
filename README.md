@@ -8,10 +8,11 @@ A comprehensive stock portfolio tracking web app with a Google-style dark mode U
 |---|---|
 | **Dashboard** | Live market indices, sector performance heatmap, top gainers/losers, portfolio & watchlist widgets |
 | **Portfolio** | Add positions with cost basis, unrealized P&L, day gain, asset allocation donut chart |
+| **Portfolio Analytics** | Unrealized vs realized return tracking, per-position weight and gain contribution metrics, sale logging |
 | **Stock Detail** | Multi-timeframe price charts, key statistics, valuation, financials, analyst consensus, company info, latest news |
-| **Watchlist** | Track stocks with price, change, volume, market cap, P/E, 52-week range bar |
+| **Watchlist + Alerts** | Track stocks with price, change, volume, market cap, P/E, 52-week range bar, and price alerts (above/below) |
 | **Markets** | Major indices ticker cards, sector ETF heatmap grid, sector comparison bar chart, top movers table |
-| **Search** | Live search by ticker symbol or company name |
+| **Search** | Ranked live search by ticker and company-name matching with improved relevance |
 | **Auth** | Register, login, persistent sessions, per-user portfolio & watchlist |
 
 ## Tech Stack
@@ -81,7 +82,7 @@ stocktrack/
 ## Data Source
 
 Market data is fetched from **Yahoo Finance** via [yfinance](https://github.com/ranaroussi/yfinance).
-Results are cached in memory (30–600 seconds depending on data type) to minimize API calls.
+Results are cached in memory with endpoint-specific TTLs and automatic cache trimming to minimize API calls and control memory growth.
 
 > **Disclaimer:** This app is for informational and educational purposes only.
 > It is not financial advice. Always do your own research before investing.

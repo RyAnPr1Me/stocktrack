@@ -89,6 +89,14 @@
     </div>
   </div>
 </div>
+
+<div class="card">
+  <div class="card-header">
+    <h2 class="card-title">Price Alerts</h2>
+    <a href="{{ url_for('watchlist') }}" class="card-link">Manage alerts →</a>
+  </div>
+  <div id="alertsQuick" class="loading-placeholder">Loading…</div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -97,20 +105,21 @@ const DATA = {};
 
 async function loadDashboard() {
   try {
-    const [summary, sectors, movers, portfolio, watchlist] = await Promise.all([
-      fetch('/api/dashboard/summary').then(r => r.json()),
-      fetch('/api/market/sectors').then(r => r.json()),
-      fetch('/api/market/movers').then(r => r.json()),
-      fetch('/api/portfolio/data').then(r => r.json()),
-      fetch('/api/watchlist/data').then(r => r.json()),
-    ]);
+    const payload = await fetch('/api/dashboard/data').then(r => r.json());
+    const summary = payload.summary || {};
+    const sectors = payload.sectors || [];
+    const movers = payload.movers || {};
+    const portfolio = payload.portfolio || {};
+    const watchlist = payload.watchlist || [];
+    const alerts = payload.alerts || {};
 
     renderStats(summary);
-    renderIndices(summary.indices);
+    renderIndices(summary.indices || []);
     renderSectors(sectors);
     renderMovers(movers);
     renderPortfolioQuick(portfolio);
     renderWatchlistQuick(watchlist);
+    renderAlertsQuick(alerts);
 
     document.getElementById('lastUpdated').textContent =
       'Last updated ' + new Date().toLocaleTimeString();
@@ -121,31 +130,31 @@ async function loadDashboard() {
 
 function renderStats(s) {
   const grid = document.getElementById('statsGrid');
-  const portfolioDir = s.portfolio_day_gain >= 0;
+  const portfolioDir = (s.portfolio_day_gain || 0) >= 0;
   grid.innerHTML = `
     <div class="stat-card">
       <div class="stat-label">Portfolio Value</div>
-      <div class="stat-value">$${fmtNum(s.portfolio_value)}</div>
+      <div class="stat-value">$${fmtNum(s.portfolio_value || 0)}</div>
       <div class="stat-change ${portfolioDir ? 'up' : 'down'}">
-        ${portfolioDir ? '▲' : '▼'} $${fmtNum(Math.abs(s.portfolio_day_gain))}
-        (${fmtPct(s.portfolio_day_gain_pct)}) today
+        ${portfolioDir ? '▲' : '▼'} $${fmtNum(Math.abs(s.portfolio_day_gain || 0))}
+        (${fmtPct(s.portfolio_day_gain_pct || 0)}) today
       </div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Positions</div>
-      <div class="stat-value">${s.position_count}</div>
+      <div class="stat-value">${s.position_count || 0}</div>
       <div class="stat-change neutral">Holdings</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Watchlist</div>
-      <div class="stat-value">${s.watchlist_count}</div>
+      <div class="stat-value">${s.watchlist_count || 0}</div>
       <div class="stat-change neutral">Stocks tracked</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">S&P 500</div>
-      <div class="stat-value">${s.indices.length > 0 ? '$' + fmtNum(s.indices[0].price) : '—'}</div>
-      <div class="stat-change ${s.indices.length > 0 && s.indices[0].change_pct >= 0 ? 'up' : 'down'}">
-        ${s.indices.length > 0 ? fmtPct(s.indices[0].change_pct) + ' today' : ''}
+      <div class="stat-value">${(s.indices || []).length > 0 ? '$' + fmtNum(s.indices[0].price) : '—'}</div>
+      <div class="stat-change ${(s.indices || []).length > 0 && s.indices[0].change_pct >= 0 ? 'up' : 'down'}">
+        ${(s.indices || []).length > 0 ? fmtPct(s.indices[0].change_pct) + ' today' : ''}
       </div>
     </div>
   `;
@@ -262,6 +271,36 @@ function renderWatchlistQuick(wl) {
       </div>
     </a>
   `).join('');
+}
+
+function renderAlertsQuick(data) {
+  const el = document.getElementById('alertsQuick');
+  const active = data.active || [];
+  const triggered = data.triggered || [];
+  if (!active.length && !triggered.length) {
+    el.innerHTML = `<p class="empty">No alerts yet. Add one from your watchlist.</p>`;
+    return;
+  }
+  const triggeredHtml = triggered.length ? `
+    <div style="margin-bottom:.75rem">
+      <strong>Recently Triggered</strong>
+      ${triggered.map(a => `
+        <div class="index-row" style="margin-top:.35rem">
+          <div class="index-info"><span class="index-name">${a.ticker}</span></div>
+          <div class="index-nums"><span class="badge badge-up">${a.direction} $${fmtNum(a.target_price)}</span></div>
+        </div>
+      `).join('')}
+    </div>` : '';
+
+  const activeHtml = active.length ? `
+    <strong>Active Alerts</strong>
+    ${active.slice(0, 8).map(a => `
+      <div class="index-row" style="margin-top:.35rem">
+        <div class="index-info"><span class="index-name">${a.ticker}</span></div>
+        <div class="index-nums"><span class="badge ${a.direction === 'above' ? 'badge-up' : 'badge-down'}">${a.direction} $${fmtNum(a.target_price)}</span></div>
+      </div>
+    `).join('')}` : '';
+  el.innerHTML = triggeredHtml + activeHtml;
 }
 
 loadDashboard();

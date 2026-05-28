@@ -35,6 +35,8 @@
 <script>
 const QUERY = '{{ query|replace("'", "\\'") }}';
 let searchTimer = null;
+let searchController = null;
+let searchReqId = 0;
 
 const input = document.getElementById('searchInput');
 
@@ -48,68 +50,86 @@ input.addEventListener('keydown', e => {
 });
 
 async function doSearch() {
+  const reqId = ++searchReqId;
   const q = input.value.trim();
   const el = document.getElementById('searchResults');
   if (!q) { el.innerHTML = ''; return; }
 
+  if (searchController) searchController.abort();
+  searchController = new AbortController();
   el.innerHTML = '<div class="loading-placeholder">Searching…</div>';
-  const results = await fetch('/api/search?q=' + encodeURIComponent(q)).then(r => r.json());
+  try {
+    const res = await fetch('/api/search?q=' + encodeURIComponent(q), { signal: searchController.signal });
+    const payload = await res.json();
+    if (!res.ok) throw new Error(payload.error || 'Search failed');
+    if (reqId !== searchReqId) return;
+    const results = payload;
 
-  if (!results.length) {
+    if (!results.length) {
+      el.innerHTML = `
+        <div class="card">
+          <div class="empty-state">
+            <p>No results for "<strong>${q}</strong>".</p>
+            <p class="text-muted">Try a ticker prefix or a company name keyword.</p>
+          </div>
+        </div>`;
+      return;
+    }
+
+    el.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">Results for "${q}"</h2>
+          <span class="card-meta">${results.length} found</span>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Ticker</th>
+                <th>Company</th>
+                <th>Sector</th>
+                <th>Exchange</th>
+                <th class="num">Price</th>
+                <th class="num">Change</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${results.map(r => `
+                <tr>
+                  <td><a href="/stock/${r.ticker}" class="ticker-link">${r.ticker}</a></td>
+                  <td class="name-cell">${r.name || '—'}</td>
+                  <td><span class="sector-pill-sm">${r.sector || '—'}</span></td>
+                  <td class="text-muted">${r.exchange || '—'}</td>
+                  <td class="num">$${fmtNum(r.price)}</td>
+                  <td class="num">
+                    <span class="badge ${r.change_pct >= 0 ? 'badge-up' : 'badge-down'}">
+                      ${fmtPct(r.change_pct)}
+                    </span>
+                  </td>
+                  <td>
+                    <a href="/stock/${r.ticker}" class="btn btn-ghost btn-xs">
+                      View →
+                    </a>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  } catch (err) {
+    if (err.name === 'AbortError') return;
     el.innerHTML = `
       <div class="card">
         <div class="empty-state">
-          <p>No results for "<strong>${q}</strong>".</p>
-          <p class="text-muted">Try a different ticker symbol or check the spelling.</p>
+          <p>Search is temporarily unavailable.</p>
+          <p class="text-muted">${err.message || 'Please try again.'}</p>
         </div>
       </div>`;
-    return;
   }
-
-  el.innerHTML = `
-    <div class="card">
-      <div class="card-header">
-        <h2 class="card-title">Results for "${q}"</h2>
-        <span class="card-meta">${results.length} found</span>
-      </div>
-      <div class="table-wrap">
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Ticker</th>
-              <th>Company</th>
-              <th>Sector</th>
-              <th>Exchange</th>
-              <th class="num">Price</th>
-              <th class="num">Change</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            ${results.map(r => `
-              <tr>
-                <td><a href="/stock/${r.ticker}" class="ticker-link">${r.ticker}</a></td>
-                <td class="name-cell">${r.name || '—'}</td>
-                <td><span class="sector-pill-sm">${r.sector || '—'}</span></td>
-                <td class="text-muted">${r.exchange || '—'}</td>
-                <td class="num">$${fmtNum(r.price)}</td>
-                <td class="num">
-                  <span class="badge ${r.change_pct >= 0 ? 'badge-up' : 'badge-down'}">
-                    ${fmtPct(r.change_pct)}
-                  </span>
-                </td>
-                <td>
-                  <a href="/stock/${r.ticker}" class="btn btn-ghost btn-xs">
-                    View →
-                  </a>
-                </td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  `;
 }
 
 if (QUERY) doSearch();
