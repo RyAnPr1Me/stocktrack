@@ -46,12 +46,12 @@ document.addEventListener('keydown', e => {
   const btnTop  = document.getElementById('topbarMenuBtn');
   const btnSide = document.getElementById('sidebarToggle');
 
-  function open()  { sidebar?.classList.add('open');  overlay?.classList.add('open'); }
-  function close() { sidebar?.classList.remove('open'); overlay?.classList.remove('open'); }
+  function openSidebar()  { sidebar?.classList.add('open');  overlay?.classList.add('open'); }
+  function closeSidebar() { sidebar?.classList.remove('open'); overlay?.classList.remove('open'); }
 
-  btnTop?.addEventListener('click',  open);
-  btnSide?.addEventListener('click', open);
-  overlay?.addEventListener('click', close);
+  btnTop?.addEventListener('click',  openSidebar);
+  btnSide?.addEventListener('click', openSidebar);
+  overlay?.addEventListener('click', closeSidebar);
 })();
 
 // ── Flash auto-dismiss ───────────────────────────────────────────────────────

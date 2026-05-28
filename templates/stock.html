@@ -212,7 +212,7 @@
       </div>
       <p class="about-text" id="aboutText">{{ quote.description[:500] }}{% if quote.description|length > 500 %}…{% endif %}</p>
       {% if quote.description|length > 500 %}
-        <button class="btn-text" onclick="expandAbout()">Show more</button>
+        <button class="btn-text" onclick="expandAbout(event)">Show more</button>
         <span id="aboutFull" style="display:none">{{ quote.description }}</span>
       {% endif %}
       {% if quote.employees or quote.country %}
@@ -396,10 +396,10 @@ function formatDate(d) {
   try { return new Date(d).toLocaleDateString(); } catch { return d; }
 }
 
-function expandAbout() {
+function expandAbout(event) {
   document.getElementById('aboutText').textContent =
     document.getElementById('aboutFull').textContent;
-  event.target.remove();
+  event?.target?.remove();
 }
 
 function removeFromWatchlist() {
