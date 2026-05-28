@@ -328,7 +328,11 @@ def login():
         if user and user.check_password(password):
             login_user(user, remember=remember)
             flash(f'Welcome back, {user.username}!', 'success')
-            return redirect(request.args.get('next') or url_for('dashboard'))
+            next_page = request.args.get('next', '')
+            # Validate next is a relative path to prevent open redirect
+            if next_page and next_page.startswith('/') and not next_page.startswith('//'):
+                return redirect(next_page)
+            return redirect(url_for('dashboard'))
         flash('Invalid username or password.', 'error')
     return render_template('login.html')
 
@@ -474,9 +478,10 @@ def remove_watchlist_by_ticker(ticker):
         db.session.delete(item)
         db.session.commit()
         flash(f'Removed {ticker} from watchlist.', 'info')
-    return redirect(request.referrer or url_for('watchlist'))
+    return redirect(url_for('watchlist'))
 
 
+@app.route('/watchlist/remove/<int:item_id>', methods=['POST'])
 @login_required
 def remove_watchlist(item_id):
     item = WatchlistItem.query.filter_by(id=item_id,
@@ -711,4 +716,5 @@ with app.app_context():
     db.create_all()
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    debug = os.environ.get('FLASK_DEBUG', '0') == '1'
+    app.run(debug=debug, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))

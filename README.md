@@ -51,6 +51,8 @@ Open **http://localhost:5000** in your browser.
 |---|---|---|
 | `SECRET_KEY` | `dev-secret-CHANGE-IN-PROD` | Flask session secret — **always change in production** |
 | `DATABASE_URL` | `sqlite:///stocktrack.db` | SQLAlchemy database URI |
+| `FLASK_DEBUG` | `0` | Set to `1` to enable debug mode (development only) |
+| `PORT` | `5000` | Port to listen on |
 
 ## Project Structure
 
