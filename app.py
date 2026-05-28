@@ -4,7 +4,6 @@ import threading
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from functools import wraps
-from urllib.parse import urlparse
 
 import pandas as pd
 import yfinance as yf
@@ -47,6 +46,7 @@ TTL_QUOTE_MEDIUM = 180
 TTL_QUOTE_SLOW = 600
 
 TICKER_PATTERN = re.compile(r'^[A-Z0-9.\-^]{1,12}$')
+MINIMUM_SHARE_THRESHOLD = 1e-8
 
 
 def _utc_now():
@@ -78,17 +78,6 @@ def _normalize_ticker(ticker: str) -> str | None:
     if not ticker or not TICKER_PATTERN.match(ticker):
         return None
     return ticker
-
-
-def _safe_next_url(target: str | None, default_endpoint: str = 'watchlist') -> str:
-    if not target:
-        return url_for(default_endpoint)
-    parsed = urlparse(target)
-    if parsed.scheme or parsed.netloc:
-        return url_for(default_endpoint)
-    if not target.startswith('/') or target.startswith('//'):
-        return url_for(default_endpoint)
-    return target
 
 
 def _rate_limit_key(scope: str) -> str:
@@ -657,7 +646,7 @@ def sell_position(pos_id):
 
     realized = (sell_price - pos.avg_cost) * shares
     pos.shares -= shares
-    if pos.shares <= 1e-8:
+    if pos.shares <= MINIMUM_SHARE_THRESHOLD:
         db.session.delete(pos)
     db.session.add(Trade(
         user_id=current_user.id,
@@ -727,24 +716,23 @@ def remove_watchlist(item_id):
 def add_alert():
     ticker = _normalize_ticker(request.form.get('ticker', ''))
     direction = (request.form.get('direction', 'above') or '').lower()
-    next_url = _safe_next_url(request.form.get('next'), default_endpoint='watchlist')
     try:
         target_price = float(request.form.get('target_price', 0))
         if target_price <= 0:
             raise ValueError
     except (TypeError, ValueError):
         flash('Enter a valid target price for alert.', 'error')
-        return redirect(next_url)
+        return redirect(url_for('watchlist'))
     if direction not in ('above', 'below'):
         flash('Alert direction must be above or below.', 'error')
-        return redirect(next_url)
+        return redirect(url_for('watchlist'))
     if not ticker:
         flash('Enter a valid ticker symbol.', 'error')
-        return redirect(next_url)
+        return redirect(url_for('watchlist'))
 
     if not get_quote(ticker):
         flash(f'Could not create alert for "{ticker}".', 'error')
-        return redirect(next_url)
+        return redirect(url_for('watchlist'))
 
     duplicate = PriceAlert.query.filter_by(
         user_id=current_user.id, ticker=ticker, target_price=target_price,
@@ -752,7 +740,7 @@ def add_alert():
     ).first()
     if duplicate:
         flash('An identical active alert already exists.', 'info')
-        return redirect(next_url)
+        return redirect(url_for('watchlist'))
 
     db.session.add(PriceAlert(
         user_id=current_user.id,
@@ -763,7 +751,7 @@ def add_alert():
     ))
     db.session.commit()
     flash(f'Alert set: {ticker} {direction} ${target_price:.2f}.', 'success')
-    return redirect(next_url)
+    return redirect(url_for('watchlist'))
 
 
 @app.route('/alerts/remove/<int:alert_id>', methods=['POST'])
@@ -774,7 +762,7 @@ def remove_alert(alert_id):
     db.session.delete(alert)
     db.session.commit()
     flash(f'Removed alert for {ticker}.', 'info')
-    return redirect(_safe_next_url(request.form.get('next'), default_endpoint='watchlist'))
+    return redirect(url_for('watchlist'))
 
 
 @app.route('/stock/<ticker>')
@@ -892,7 +880,8 @@ def api_portfolio_data():
         user_id=current_user.id, side='SELL'
     ).scalar() or 0.0
     day_gain = sum(r['day_gain'] for r in rows)
-    day_pct = (day_gain / (total_value - day_gain) * 100) if (total_value - day_gain) else 0
+    prev_value = total_value - day_gain
+    day_pct = (day_gain / prev_value * 100) if prev_value else 0
     return jsonify({
         'positions': rows,
         'total_value': round(total_value, 2),

@@ -124,10 +124,12 @@ async function loadWatchlist() {
 
   const triggered = payload.triggered_alerts || [];
   if (triggered.length) {
-    const summary = triggered.map(a => `${a.ticker} (${a.direction} $${fmtNum(a.target_price)})`).join(', ');
+    const preview = triggered.slice(0, 3);
+    const summary = preview.map(a => `${a.ticker} (${a.direction} $${fmtNum(a.target_price)})`).join(', ');
+    const suffix = triggered.length > preview.length ? `, and ${triggered.length - preview.length} more` : '';
     const container = document.createElement('div');
     container.className = 'flash info';
-    container.textContent = `Triggered alerts: ${summary}`;
+    container.textContent = `Triggered alerts: ${summary}${suffix}`;
     document.querySelector('.page-header')?.after(container);
     setTimeout(() => container.remove(), 5000);
   }
