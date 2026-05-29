@@ -481,6 +481,12 @@ def evaluate_price_alerts(user_id: int, quote_map: dict[str, dict] | None = None
 
 
 # ── Technical Analysis & Price Prediction ─────────────────────────────────────
+# Small epsilon added to close prices before log() to prevent log(0) on zero
+# or near-zero prices that occasionally appear in yfinance data.
+_LOG_EPSILON = 1e-9
+# Fraction of daily volatility used to tilt the projection toward the
+# signal-weighted direction (0 = no tilt, 1 = full-vol tilt per √day).
+_BIAS_SCALING_FACTOR = 0.5
 def _ema_series(arr: np.ndarray, span: int) -> np.ndarray:
     """Compute EMA over a 1-D array using the standard smoothing factor."""
     k = 2.0 / (span + 1)
@@ -650,10 +656,10 @@ def compute_technical_signals(closes: np.ndarray, volumes: np.ndarray) -> dict:
     # ── Price Projections ─────────────────────────────────────────────────────
     hist_len = min(180, n)
     if hist_len >= 20:
-        log_ret = np.diff(np.log(closes[-hist_len:].astype(float) + 1e-9))
+        log_ret = np.diff(np.log(closes[-hist_len:].astype(float) + _LOG_EPSILON))
         daily_mu = float(np.mean(log_ret))
         daily_vol = float(np.std(log_ret))
-        bias_scale = (score / 100.0) * daily_vol * 0.5
+        bias_scale = (score / 100.0) * daily_vol * _BIAS_SCALING_FACTOR
         projections: dict = {}
         for days in [7, 14, 30]:
             exp_log_ret = daily_mu * days + bias_scale * float(np.sqrt(days))
