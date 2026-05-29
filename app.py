@@ -324,6 +324,17 @@ def get_quotes_map(tickers: list[str], ttl: int = TTL_QUOTE_FAST) -> dict[str, d
     return result
 
 
+def _sma_array(values: list, period: int) -> list:
+    """Return SMA array aligned with values; None for positions lacking history."""
+    out = []
+    for i, _ in enumerate(values):
+        if i + 1 < period:
+            out.append(None)
+        else:
+            out.append(round(sum(values[i + 1 - period:i + 1]) / period, 2))
+    return out
+
+
 def get_chart_data(ticker: str, period: str = '1mo') -> dict | None:
     period_to_interval = {
         '1d': '5m', '5d': '15m', '1mo': '1d', '3mo': '1d',
@@ -342,13 +353,16 @@ def get_chart_data(ticker: str, period: str = '1mo') -> dict | None:
         if hist.empty:
             return None
         hist.index = pd.to_datetime(hist.index)
+        closes = [round(float(v), 2) for v in hist['Close']]
         data = {
             'labels': [str(d)[:16] for d in hist.index],
             'open':   [round(float(v), 2) for v in hist['Open']],
             'high':   [round(float(v), 2) for v in hist['High']],
             'low':    [round(float(v), 2) for v in hist['Low']],
-            'close':  [round(float(v), 2) for v in hist['Close']],
+            'close':  closes,
             'volume': [int(v) for v in hist['Volume']],
+            'sma20':  _sma_array(closes, 20),
+            'sma50':  _sma_array(closes, 50),
         }
         cache_set(key, data)
         return data
@@ -387,6 +401,88 @@ def get_news(ticker: str) -> list:
         return result
     except Exception as exc:
         print(f'[get_news] {ticker}: {exc}')
+        return []
+
+
+def get_financials(ticker: str) -> dict:
+    """Return quarterly revenue and net income (in billions) for the past 8 quarters."""
+    ticker = _normalize_ticker(ticker)
+    if not ticker:
+        return {'labels': [], 'revenue': [], 'net_income': []}
+    cached = cache_get(f'fin:{ticker}', TTL_QUOTE_SLOW)
+    if cached is not None:
+        return cached
+    empty: dict = {'labels': [], 'revenue': [], 'net_income': []}
+    try:
+        t = yf.Ticker(ticker)
+        q_fin = t.quarterly_income_stmt
+        if q_fin is None or q_fin.empty:
+            cache_set(f'fin:{ticker}', empty)
+            return empty
+        labels, revenue, net_income = [], [], []
+        cols = list(q_fin.columns[:8])
+        for col in reversed(cols):
+            try:
+                dt = pd.to_datetime(col)
+                labels.append(dt.strftime('%b %Y'))
+            except Exception:
+                labels.append(str(col)[:10])
+            rev_val = None
+            for row_name in ('Total Revenue', 'Revenue', 'Net Revenue'):
+                if row_name in q_fin.index:
+                    v = q_fin.loc[row_name, col]
+                    if v is not None and not (isinstance(v, float) and pd.isna(v)):
+                        rev_val = round(float(v) / 1e9, 3)
+                    break
+            net_val = None
+            for row_name in ('Net Income', 'Net Income Common Stockholders'):
+                if row_name in q_fin.index:
+                    v = q_fin.loc[row_name, col]
+                    if v is not None and not (isinstance(v, float) and pd.isna(v)):
+                        net_val = round(float(v) / 1e9, 3)
+                    break
+            revenue.append(rev_val)
+            net_income.append(net_val)
+        result = {'labels': labels, 'revenue': revenue, 'net_income': net_income}
+        cache_set(f'fin:{ticker}', result)
+        return result
+    except Exception as exc:
+        print(f'[get_financials] {ticker}: {exc}')
+        return empty
+
+
+def get_holders(ticker: str) -> list:
+    """Return top institutional holders for the ticker."""
+    ticker = _normalize_ticker(ticker)
+    if not ticker:
+        return []
+    cached = cache_get(f'hold:{ticker}', TTL_QUOTE_SLOW)
+    if cached is not None:
+        return cached
+    try:
+        t = yf.Ticker(ticker)
+        df = t.institutional_holders
+        if df is None or df.empty:
+            cache_set(f'hold:{ticker}', [])
+            return []
+        result = []
+        for _, row in df.head(10).iterrows():
+            holder = str(row.get('Holder', ''))
+            shares_raw = row.get('Shares')
+            shares = int(shares_raw) if shares_raw is not None and not (isinstance(shares_raw, float) and pd.isna(shares_raw)) else 0
+            val_raw = row.get('Value')
+            val = float(val_raw) if val_raw is not None and not (isinstance(val_raw, float) and pd.isna(val_raw)) else None
+            pct_raw = row.get('% Out')
+            pct = float(pct_raw) if pct_raw is not None and not (isinstance(pct_raw, float) and pd.isna(pct_raw)) else None
+            if pct is not None and pct < 1.0:
+                pct = round(pct * 100, 2)
+            else:
+                pct = round(pct, 2) if pct is not None else None
+            result.append({'holder': holder, 'shares': shares, 'value': val, 'pct_held': pct})
+        cache_set(f'hold:{ticker}', result)
+        return result
+    except Exception as exc:
+        print(f'[get_holders] {ticker}: {exc}')
         return []
 
 
@@ -979,6 +1075,44 @@ def add_alert():
     return redirect(url_for('watchlist'))
 
 
+@app.route('/alerts/add-from-stock', methods=['POST'])
+@login_required
+def add_alert_from_stock():
+    """Set a price alert and redirect back to the stock detail page."""
+    ticker = _normalize_ticker(request.form.get('ticker', ''))
+    direction = (request.form.get('direction', 'above') or '').lower()
+    try:
+        target_price = float(request.form.get('target_price', 0))
+        if target_price <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        flash('Enter a valid target price for alert.', 'error')
+        return redirect(url_for('stock_detail', ticker=ticker or 'AAPL'))
+    if direction not in ('above', 'below'):
+        flash('Alert direction must be above or below.', 'error')
+        return redirect(url_for('stock_detail', ticker=ticker))
+    if not ticker:
+        flash('Enter a valid ticker symbol.', 'error')
+        return redirect(url_for('dashboard'))
+    if not get_quote(ticker):
+        flash(f'Could not create alert for "{ticker}".', 'error')
+        return redirect(url_for('stock_detail', ticker=ticker))
+    duplicate = PriceAlert.query.filter_by(
+        user_id=current_user.id, ticker=ticker, target_price=target_price,
+        direction=direction, is_active=True,
+    ).first()
+    if not duplicate:
+        db.session.add(PriceAlert(
+            user_id=current_user.id, ticker=ticker,
+            target_price=target_price, direction=direction, is_active=True,
+        ))
+        db.session.commit()
+        flash(f'Alert set: {ticker} {direction} ${target_price:.2f}.', 'success')
+    else:
+        flash('An identical active alert already exists.', 'info')
+    return redirect(url_for('stock_detail', ticker=ticker))
+
+
 @app.route('/alerts/remove/<int:alert_id>', methods=['POST'])
 @login_required
 def remove_alert(alert_id):
@@ -1002,8 +1136,11 @@ def stock_detail(ticker):
         user_id=current_user.id, ticker=ticker).first() is not None
     position = Position.query.filter_by(
         user_id=current_user.id, ticker=ticker).first()
+    active_alerts = PriceAlert.query.filter_by(
+        user_id=current_user.id, ticker=ticker, is_active=True).all()
     return render_template('stock.html', quote=q,
-                           in_watchlist=in_watchlist, position=position)
+                           in_watchlist=in_watchlist, position=position,
+                           active_alerts=active_alerts)
 
 
 @app.route('/market')
@@ -1068,6 +1205,26 @@ def api_predict(ticker):
     if not data:
         return jsonify({'error': 'Insufficient historical data for this ticker'}), 404
     return jsonify(data)
+
+
+@app.route('/api/financials/<ticker>')
+@login_required
+@rate_limit('api_financials', limit=30, window_seconds=60)
+def api_financials(ticker):
+    safe_ticker = _normalize_ticker(ticker)
+    if not safe_ticker:
+        return jsonify({'error': 'Invalid ticker symbol'}), 400
+    return jsonify(get_financials(safe_ticker))
+
+
+@app.route('/api/holders/<ticker>')
+@login_required
+@rate_limit('api_holders', limit=30, window_seconds=60)
+def api_holders(ticker):
+    safe_ticker = _normalize_ticker(ticker)
+    if not safe_ticker:
+        return jsonify({'error': 'Invalid ticker symbol'}), 400
+    return jsonify(get_holders(safe_ticker))
 
 
 @app.route('/api/portfolio/data')

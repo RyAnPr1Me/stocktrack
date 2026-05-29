@@ -59,9 +59,16 @@
       <button class="tf-btn" data-period="5y">5Y</button>
       <button class="tf-btn" data-period="max">MAX</button>
     </div>
-    <div class="chart-type-tabs" id="chartTypeTabs">
-      <button class="ct-btn active" data-type="line">Line</button>
-      <button class="ct-btn" data-type="bar">Volume</button>
+    <div class="chart-controls-row">
+      <div class="chart-type-tabs" id="chartTypeTabs">
+        <button class="ct-btn active" data-type="line">Line</button>
+        <button class="ct-btn" data-type="ohlc">OHLC</button>
+        <button class="ct-btn" data-type="bar">Volume</button>
+      </div>
+      <div class="sma-toggles" id="smaToggles">
+        <button class="sma-btn" data-sma="20" title="SMA 20">SMA 20</button>
+        <button class="sma-btn" data-sma="50" title="SMA 50">SMA 50</button>
+      </div>
     </div>
   </div>
   <div class="chart-container-lg">
@@ -74,6 +81,21 @@
   <div class="section-third">
     <div class="card">
       <div class="card-header"><h2 class="card-title">Key Statistics</h2></div>
+      {% if quote.week_52_low and quote.week_52_high and quote.week_52_high > quote.week_52_low %}
+        {% set w52_pct = ((quote.price - quote.week_52_low) / (quote.week_52_high - quote.week_52_low) * 100) | round(1) %}
+        {% set w52_pct_clamped = [0, [w52_pct, 100] | min] | max %}
+        <div class="range52-wrap">
+          <div class="range52-labels">
+            <span>${{ "%.2f"|format(quote.week_52_low) }}</span>
+            <span class="range52-center">52-Week Range</span>
+            <span>${{ "%.2f"|format(quote.week_52_high) }}</span>
+          </div>
+          <div class="range52-track">
+            <div class="range52-thumb" style="left:{{ w52_pct_clamped }}%"></div>
+          </div>
+          <div class="range52-pos">{{ w52_pct_clamped }}% of 52W range</div>
+        </div>
+      {% endif %}
       <table class="stats-table">
         <tr><td class="stat-k">Open</td>
             <td class="stat-v">{{ "$%.2f"|format(quote.open_price) if quote.open_price else 'N/A' }}</td></tr>
@@ -244,6 +266,80 @@
   </div>
 </div>
 
+<!-- Quarterly Revenue & Earnings Charts -->
+<div class="section-row">
+  <div class="section-half">
+    <div class="card">
+      <div class="card-header"><h2 class="card-title">Quarterly Revenue</h2></div>
+      <div class="chart-container-md" id="revenueChartWrap">
+        <canvas id="revenueChart"></canvas>
+      </div>
+    </div>
+  </div>
+  <div class="section-half">
+    <div class="card">
+      <div class="card-header"><h2 class="card-title">Quarterly Net Income</h2></div>
+      <div class="chart-container-md" id="netIncomeChartWrap">
+        <canvas id="netIncomeChart"></canvas>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Institutional Holders & Price Alert -->
+<div class="section-row">
+  <div class="section-half">
+    <div class="card">
+      <div class="card-header"><h2 class="card-title">Institutional Holders</h2></div>
+      <div id="holdersList" class="holders-loading">
+        <div class="loading-spinner"></div>
+      </div>
+    </div>
+  </div>
+  <div class="section-half">
+    <div class="card">
+      <div class="card-header"><h2 class="card-title">Set Price Alert</h2></div>
+      <form method="post" action="{{ url_for('add_alert_from_stock') }}" class="alert-form">
+        <input type="hidden" name="ticker" value="{{ quote.ticker }}" />
+        <div class="alert-form-row">
+          <div class="form-group">
+            <label>Direction</label>
+            <select name="direction" class="form-select">
+              <option value="above">Above</option>
+              <option value="below">Below</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Target Price ($)</label>
+            <input type="number" name="target_price"
+                   placeholder="{{ '%.2f'|format(quote.price) }}"
+                   step="0.01" min="0.01" required class="form-input" />
+          </div>
+          <div class="form-group form-group-btn">
+            <button type="submit" class="btn btn-primary">Set Alert</button>
+          </div>
+        </div>
+      </form>
+      {% if active_alerts %}
+        <div class="active-alerts-list">
+          <div class="active-alerts-title">Active Alerts</div>
+          {% for alert in active_alerts %}
+            <div class="active-alert-row">
+              <span class="alert-dir {{ 'alert-above' if alert.direction == 'above' else 'alert-below' }}">
+                {{ alert.direction | upper }}
+              </span>
+              <span class="alert-price">${{ "%.2f"|format(alert.target_price) }}</span>
+              <form method="post" action="{{ url_for('remove_alert', alert_id=alert.id) }}" style="display:inline">
+                <button type="submit" class="btn-icon-sm" title="Remove alert">×</button>
+              </form>
+            </div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
 <!-- News -->
 <div class="card">
   <div class="card-header">
@@ -295,13 +391,125 @@ const TICKER = '{{ quote.ticker }}';
 let priceChart = null;
 let currentType = 'line';
 let currentPeriod = '1mo';
+let smaActive = { 20: false, 50: false };
+let lastChartData = null;
 
+// ── OHLC helpers ───────────────────────────────────────────────────────────
+function drawOhlcChart(ctx, data) {
+  if (priceChart) { priceChart.destroy(); priceChart = null; }
+
+  const canvas = ctx.canvas;
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.offsetWidth;
+  const H = canvas.offsetHeight;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  ctx.scale(dpr, dpr);
+
+  const pad = { top: 20, right: 20, bottom: 40, left: 60 };
+  const iW = W - pad.left - pad.right;
+  const iH = H - pad.top - pad.bottom;
+  const n = data.labels.length;
+  if (!n) return;
+
+  const allH = data.high, allL = data.low, closes = data.close;
+  const minP = Math.min(...allL);
+  const maxP = Math.max(...allH);
+  const range = maxP - minP || 1;
+  const barW = Math.max(2, Math.floor(iW / n) - 2);
+
+  const xOf = i => pad.left + (i + 0.5) * (iW / n);
+  const yOf = v => pad.top + iH - (v - minP) / range * iH;
+
+  // Background
+  ctx.fillStyle = 'transparent';
+  ctx.fillRect(0, 0, W, H);
+
+  // Grid lines + Y labels
+  ctx.textAlign = 'right';
+  ctx.font = '11px Inter, sans-serif';
+  ctx.fillStyle = '#64748b';
+  const ticks = 5;
+  for (let i = 0; i <= ticks; i++) {
+    const v = minP + (range * i / ticks);
+    const y = yOf(v);
+    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
+    ctx.fillStyle = '#64748b';
+    ctx.fillText('$' + v.toFixed(2), pad.left - 6, y + 4);
+  }
+
+  // X labels (every ~8th bar)
+  ctx.textAlign = 'center';
+  const step = Math.max(1, Math.floor(n / 8));
+  for (let i = 0; i < n; i += step) {
+    const lbl = (data.labels[i] || '').slice(0, 10);
+    ctx.fillText(lbl, xOf(i), H - pad.bottom + 14);
+  }
+
+  // OHLC bars
+  for (let i = 0; i < n; i++) {
+    const x = xOf(i);
+    const up = closes[i] >= (i > 0 ? closes[i - 1] : closes[i]);
+    ctx.strokeStyle = up ? '#10b981' : '#ef4444';
+    ctx.lineWidth = 1;
+    // High-low wick
+    ctx.beginPath();
+    ctx.moveTo(x, yOf(allH[i]));
+    ctx.lineTo(x, yOf(allL[i]));
+    ctx.stroke();
+    // Open tick (left)
+    ctx.beginPath();
+    ctx.moveTo(x - barW / 2, yOf(data.open[i]));
+    ctx.lineTo(x, yOf(data.open[i]));
+    ctx.stroke();
+    // Close tick (right)
+    ctx.beginPath();
+    ctx.moveTo(x, yOf(closes[i]));
+    ctx.lineTo(x + barW / 2, yOf(closes[i]));
+    ctx.stroke();
+  }
+
+  // SMA overlays on OHLC
+  drawSmaOverlay(ctx, data, xOf, yOf, iW, iH, n);
+}
+
+function drawSmaOverlay(ctx, data, xOf, yOf) {
+  const smaDefs = [
+    { key: 'sma20', color: '#f59e0b', label: 'SMA20', active: smaActive[20] },
+    { key: 'sma50', color: '#8b5cf6', label: 'SMA50', active: smaActive[50] },
+  ];
+  for (const def of smaDefs) {
+    if (!def.active || !data[def.key]) continue;
+    const pts = data[def.key];
+    ctx.strokeStyle = def.color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    let started = false;
+    for (let i = 0; i < pts.length; i++) {
+      if (pts[i] === null) continue;
+      const x = xOf(i);
+      const y = yOf(pts[i]);
+      if (!started) { ctx.moveTo(x, y); started = true; }
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+}
+
+// ── Main chart loader ──────────────────────────────────────────────────────
 async function loadChart(period) {
   currentPeriod = period;
   const data = await fetch(`/api/chart/${TICKER}?period=${period}`).then(r => r.json());
   if (data.error) return;
+  lastChartData = data;
 
   const ctx = document.getElementById('priceChart').getContext('2d');
+
+  if (currentType === 'ohlc') {
+    drawOhlcChart(ctx, data);
+    return;
+  }
 
   const first = data.close[0];
   const last = data.close[data.close.length - 1];
@@ -310,14 +518,17 @@ async function loadChart(period) {
 
   const desiredType = currentType === 'bar' ? 'bar' : 'line';
   const nextLabels = data.labels;
-  const nextDataset = desiredType === 'bar'
-    ? {
+
+  let datasets = [];
+  if (desiredType === 'bar') {
+    datasets = [{
       label: 'Volume',
       data: data.volume,
       backgroundColor: up ? 'rgba(16,185,129,0.4)' : 'rgba(239,68,68,0.4)',
       borderRadius: 2,
-    }
-    : {
+    }];
+  } else {
+    datasets = [{
       label: TICKER,
       data: data.close,
       borderColor: color,
@@ -326,31 +537,55 @@ async function loadChart(period) {
       fill: true,
       pointRadius: 0,
       tension: 0.3,
-    };
+    }];
+    // SMA overlays for line chart
+    if (smaActive[20] && data.sma20) {
+      datasets.push({
+        label: 'SMA 20',
+        data: data.sma20,
+        borderColor: '#f59e0b',
+        borderWidth: 1.5,
+        pointRadius: 0,
+        fill: false,
+        tension: 0.2,
+      });
+    }
+    if (smaActive[50] && data.sma50) {
+      datasets.push({
+        label: 'SMA 50',
+        data: data.sma50,
+        borderColor: '#8b5cf6',
+        borderWidth: 1.5,
+        pointRadius: 0,
+        fill: false,
+        tension: 0.2,
+      });
+    }
+  }
 
+  const yLabel = desiredType === 'bar' ? 'Volume' : 'Price ($)';
   if (priceChart && priceChart.config.type === desiredType) {
     priceChart.data.labels = nextLabels;
-    priceChart.data.datasets[0] = nextDataset;
-    priceChart.options = chartOpts(desiredType === 'bar' ? 'Volume' : 'Price ($)');
+    priceChart.data.datasets = datasets;
+    priceChart.options = chartOpts(yLabel, datasets.length > 1);
     priceChart.update();
     return;
   }
-
   if (priceChart) priceChart.destroy();
   priceChart = new Chart(ctx, {
     type: desiredType,
-    data: { labels: nextLabels, datasets: [nextDataset] },
-    options: chartOpts(desiredType === 'bar' ? 'Volume' : 'Price ($)'),
+    data: { labels: nextLabels, datasets },
+    options: chartOpts(yLabel, datasets.length > 1),
   });
 }
 
-function chartOpts(label) {
+function chartOpts(label, showLegend = false) {
   return {
     responsive: true,
     maintainAspectRatio: false,
     interaction: { mode: 'index', intersect: false },
     plugins: {
-      legend: { display: false },
+      legend: { display: showLegend, labels: { color: '#94a3b8', font: { size: 11 } } },
       tooltip: {
         backgroundColor: '#1c1c2e',
         titleColor: '#e2e8f0',
@@ -358,7 +593,7 @@ function chartOpts(label) {
         borderColor: 'rgba(99,102,241,0.3)',
         borderWidth: 1,
         callbacks: {
-          label: ctx => ` ${label === 'Volume' ? ctx.raw.toLocaleString() : '$' + fmtNum(ctx.raw)}`
+          label: ctx => ` ${label === 'Volume' ? ctx.raw.toLocaleString() : (ctx.raw !== null ? '$' + fmtNum(ctx.raw) : 'N/A')}`
         }
       }
     },
@@ -390,8 +625,136 @@ document.getElementById('chartTypeTabs').addEventListener('click', e => {
   document.querySelectorAll('.ct-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   currentType = btn.dataset.type;
+  // OHLC chart is drawn on canvas directly — hide SMA toggles when volume shown
+  document.getElementById('smaToggles').style.visibility =
+    currentType === 'bar' ? 'hidden' : 'visible';
   loadChart(currentPeriod);
 });
+
+// SMA toggle buttons
+document.getElementById('smaToggles').addEventListener('click', e => {
+  const btn = e.target.closest('.sma-btn');
+  if (!btn) return;
+  const period = parseInt(btn.dataset.sma, 10);
+  smaActive[period] = !smaActive[period];
+  btn.classList.toggle('active', smaActive[period]);
+  loadChart(currentPeriod);
+});
+
+// ── Financial charts ───────────────────────────────────────────────────────
+async function loadFinancials() {
+  try {
+    const data = await fetch(`/api/financials/${TICKER}`).then(r => r.json());
+    if (!data.labels || !data.labels.length) {
+      document.getElementById('revenueChartWrap').innerHTML = '<p class="empty">No financial data available.</p>';
+      document.getElementById('netIncomeChartWrap').innerHTML = '<p class="empty">No financial data available.</p>';
+      return;
+    }
+
+    const barOpts = (label, colors) => ({
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1c1c2e',
+          titleColor: '#e2e8f0',
+          bodyColor: '#94a3b8',
+          borderColor: 'rgba(99,102,241,0.3)',
+          borderWidth: 1,
+          callbacks: { label: c => ` $${c.raw !== null ? c.raw.toFixed(2) + 'B' : 'N/A'}` }
+        }
+      },
+      scales: {
+        x: { grid: { color: 'rgba(255,255,255,0.04)' },
+             ticks: { color: '#64748b', font: { size: 11 } } },
+        y: { grid: { color: 'rgba(255,255,255,0.04)' },
+             ticks: { color: '#64748b', font: { size: 11 },
+                      callback: v => '$' + v.toFixed(1) + 'B' } },
+      },
+      animation: { duration: 300 },
+    });
+
+    new Chart(document.getElementById('revenueChart').getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels: data.labels,
+        datasets: [{
+          label: 'Revenue (B)',
+          data: data.revenue,
+          backgroundColor: 'rgba(99,102,241,0.55)',
+          borderColor: 'rgba(99,102,241,0.9)',
+          borderWidth: 1,
+          borderRadius: 4,
+        }],
+      },
+      options: barOpts('Revenue'),
+    });
+
+    new Chart(document.getElementById('netIncomeChart').getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels: data.labels,
+        datasets: [{
+          label: 'Net Income (B)',
+          data: data.net_income,
+          backgroundColor: data.net_income.map(v => v !== null && v >= 0
+            ? 'rgba(16,185,129,0.55)' : 'rgba(239,68,68,0.55)'),
+          borderColor: data.net_income.map(v => v !== null && v >= 0
+            ? 'rgba(16,185,129,0.9)' : 'rgba(239,68,68,0.9)'),
+          borderWidth: 1,
+          borderRadius: 4,
+        }],
+      },
+      options: barOpts('Net Income'),
+    });
+  } catch (_) {
+    document.getElementById('revenueChartWrap').innerHTML = '<p class="empty">Failed to load financial data.</p>';
+    document.getElementById('netIncomeChartWrap').innerHTML = '<p class="empty">Failed to load financial data.</p>';
+  }
+}
+
+// ── Institutional holders ──────────────────────────────────────────────────
+async function loadHolders() {
+  const el = document.getElementById('holdersList');
+  try {
+    const data = await fetch(`/api/holders/${TICKER}`).then(r => r.json());
+    if (!data.length) {
+      el.innerHTML = '<p class="empty">No institutional holder data available.</p>';
+      return;
+    }
+    el.innerHTML = `
+      <table class="holders-table">
+        <thead>
+          <tr>
+            <th>Institution</th>
+            <th class="text-right">Shares</th>
+            <th class="text-right">% Held</th>
+            <th class="text-right">Value</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${data.map(h => `
+            <tr>
+              <td class="holder-name">${h.holder}</td>
+              <td class="text-right">${h.shares ? h.shares.toLocaleString() : 'N/A'}</td>
+              <td class="text-right">${h.pct_held !== null ? h.pct_held + '%' : 'N/A'}</td>
+              <td class="text-right">${h.value !== null ? fmtLarge(h.value) : 'N/A'}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+  } catch (_) {
+    el.innerHTML = '<p class="empty">Failed to load holder data.</p>';
+  }
+}
+
+function fmtLarge(n) {
+  if (n === null || n === undefined) return 'N/A';
+  if (Math.abs(n) >= 1e12) return '$' + (n / 1e12).toFixed(2) + 'T';
+  if (Math.abs(n) >= 1e9)  return '$' + (n / 1e9).toFixed(2) + 'B';
+  if (Math.abs(n) >= 1e6)  return '$' + (n / 1e6).toFixed(2) + 'M';
+  return '$' + n.toLocaleString();
+}
 
 async function loadNews() {
   const news = await fetch(`/api/news/${TICKER}`).then(r => r.json());
@@ -527,8 +890,6 @@ function expandAbout(event) {
 }
 
 function removeFromWatchlist() {
-  // Need to find the watchlist item id — redirect to dedicated remove endpoint
-  // by posting the form that holds the watchlist item id
   if (confirm('Remove {{ quote.ticker }} from watchlist?')) {
     document.getElementById('removeWatchlistForm').submit();
   }
@@ -537,5 +898,7 @@ function removeFromWatchlist() {
 loadChart('1mo');
 loadNews();
 loadForecast();
+loadFinancials();
+loadHolders();
 </script>
 {% endblock %}

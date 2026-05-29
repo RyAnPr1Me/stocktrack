@@ -1276,3 +1276,164 @@ a:hover { color: var(--accent-hover); }
   .forecast-grid { flex-direction: column; }
   .forecast-left { flex: none; }
 }
+
+/* ── 52-Week Range Gauge ───────────────────────────────────────────────── */
+.range52-wrap {
+  padding: 14px 20px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.range52-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.range52-center { color: var(--text-secondary); font-weight: 500; }
+.range52-track {
+  position: relative;
+  height: 5px;
+  background: var(--bg-input);
+  border-radius: 99px;
+}
+.range52-thumb {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg-card);
+  box-shadow: 0 0 0 2px var(--accent);
+  transition: left 0.3s;
+}
+.range52-pos {
+  text-align: center;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-top: 5px;
+}
+
+/* ── Chart controls row ────────────────────────────────────────────────── */
+.chart-controls-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.sma-toggles {
+  display: flex;
+  gap: 6px;
+}
+.sma-btn {
+  padding: 3px 9px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.sma-btn[data-sma="20"].active { background: rgba(245,158,11,0.12); color: #f59e0b; border-color: rgba(245,158,11,0.4); }
+.sma-btn[data-sma="50"].active { background: rgba(139,92,246,0.12); color: #8b5cf6; border-color: rgba(139,92,246,0.4); }
+.sma-btn:hover { border-color: var(--accent); color: var(--text-primary); }
+
+/* ── Institutional Holders table ──────────────────────────────────────── */
+.holders-loading { padding: 20px; display: flex; justify-content: center; }
+.holders-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+.holders-table thead tr {
+  border-bottom: 1px solid var(--border);
+}
+.holders-table th {
+  padding: 8px 16px;
+  color: var(--text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+}
+.holders-table td {
+  padding: 9px 16px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+}
+.holders-table tr:last-child td { border-bottom: none; }
+.holders-table tr:hover td { background: rgba(99,102,241,0.04); }
+.holder-name { color: var(--text-primary); font-weight: 500; }
+.text-right { text-align: right; }
+
+/* ── Price Alert form on stock page ───────────────────────────────────── */
+.alert-form { padding: 16px 20px; }
+.alert-form-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.alert-form-row .form-group { flex: 1 1 120px; }
+.form-group-btn { flex: 0 0 auto !important; }
+.form-select,
+.form-input {
+  width: 100%;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  padding: 7px 10px;
+  transition: border-color 0.15s;
+}
+.form-select:focus, .form-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.active-alerts-list {
+  padding: 0 20px 16px;
+  border-top: 1px solid var(--border);
+}
+.active-alerts-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 10px 0 6px;
+}
+.active-alert-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+.active-alert-row:last-child { border-bottom: none; }
+.alert-dir {
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+.alert-above { background: rgba(16,185,129,0.1); color: var(--green); }
+.alert-below { background: rgba(239,68,68,0.1);  color: var(--red); }
+.alert-price { flex: 1; color: var(--text-primary); font-weight: 600; }
+.btn-icon-sm {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: color 0.15s, background 0.15s;
+}
+.btn-icon-sm:hover { color: var(--red); background: rgba(239,68,68,0.08); }
