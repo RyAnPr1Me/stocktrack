@@ -5,6 +5,7 @@ from collections import OrderedDict, defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 from flask import (Flask, abort, flash, jsonify, redirect,
@@ -479,6 +480,223 @@ def evaluate_price_alerts(user_id: int, quote_map: dict[str, dict] | None = None
     return triggered
 
 
+# ── Technical Analysis & Price Prediction ─────────────────────────────────────
+def _ema_series(arr: np.ndarray, span: int) -> np.ndarray:
+    """Compute EMA over a 1-D array using the standard smoothing factor."""
+    k = 2.0 / (span + 1)
+    out = np.empty(len(arr))
+    out[0] = arr[0]
+    for i in range(1, len(arr)):
+        out[i] = arr[i] * k + out[i - 1] * (1 - k)
+    return out
+
+
+def compute_technical_signals(closes: np.ndarray, volumes: np.ndarray) -> dict:
+    """
+    Compute a composite technical-analysis signal score (-100 to +100)
+    and forward price projections for 7 / 14 / 30 trading days.
+
+    Indicators used:
+      SMA 20 / 50 cross · RSI(14) · MACD(12,26,9) · Bollinger Bands(20,2σ)
+      Rate-of-change (5 / 20 day) · Volume ratio · Linear-regression slope
+    """
+    n = len(closes)
+    price = float(closes[-1])
+    signals: dict = {'price': price}
+    score = 0
+
+    # ── Moving Averages ────────────────────────────────────────────────────────
+    def sma(window: int):
+        return float(np.mean(closes[-window:])) if n >= window else None
+
+    sma20 = sma(20)
+    sma50 = sma(50)
+
+    if sma20 is not None:
+        signals['sma20'] = round(sma20, 2)
+        if price > sma20:
+            score += 10
+            signals['sma20_signal'] = 'bullish'
+        else:
+            score -= 10
+            signals['sma20_signal'] = 'bearish'
+
+    if sma20 is not None and sma50 is not None:
+        signals['sma50'] = round(sma50, 2)
+        if sma20 > sma50:
+            score += 15
+            signals['ma_cross_signal'] = 'golden'
+        else:
+            score -= 15
+            signals['ma_cross_signal'] = 'death'
+
+    # ── RSI (14) ───────────────────────────────────────────────────────────────
+    if n >= 15:
+        deltas = np.diff(closes[-15:].astype(float))
+        gains = float(deltas[deltas > 0].sum()) / 14
+        losses = float(-deltas[deltas < 0].sum()) / 14
+        rsi = 100.0 if losses == 0 else 100.0 - (100.0 / (1.0 + gains / losses))
+        signals['rsi'] = round(rsi, 1)
+        if rsi < 30:
+            score += 20
+            signals['rsi_signal'] = 'oversold'
+        elif rsi > 70:
+            score -= 20
+            signals['rsi_signal'] = 'overbought'
+        elif rsi >= 50:
+            score += 5
+            signals['rsi_signal'] = 'bullish'
+        else:
+            score -= 5
+            signals['rsi_signal'] = 'bearish'
+
+    # ── MACD (12 / 26 / 9) ────────────────────────────────────────────────────
+    if n >= 35:
+        ema12 = _ema_series(closes.astype(float), 12)
+        ema26 = _ema_series(closes.astype(float), 26)
+        macd_line = ema12 - ema26
+        signal_line = _ema_series(macd_line, 9)
+        macd_val = float(macd_line[-1])
+        signal_val = float(signal_line[-1])
+        signals['macd'] = round(macd_val, 4)
+        signals['macd_signal_line'] = round(signal_val, 4)
+        if macd_val > signal_val:
+            score += 15
+            signals['macd_cross'] = 'bullish'
+        else:
+            score -= 15
+            signals['macd_cross'] = 'bearish'
+
+    # ── Bollinger Bands (20, ±2σ) ─────────────────────────────────────────────
+    if n >= 20:
+        bb = closes[-20:].astype(float)
+        bb_mean = float(np.mean(bb))
+        bb_std = float(np.std(bb))
+        upper_bb = bb_mean + 2 * bb_std
+        lower_bb = bb_mean - 2 * bb_std
+        bb_pct = (price - lower_bb) / (upper_bb - lower_bb) if upper_bb != lower_bb else 0.5
+        signals['bb_pct'] = round(bb_pct, 2)
+        signals['bb_upper'] = round(upper_bb, 2)
+        signals['bb_lower'] = round(lower_bb, 2)
+        if bb_pct < 0.2:
+            score += 15
+            signals['bb_signal'] = 'oversold'
+        elif bb_pct > 0.8:
+            score -= 15
+            signals['bb_signal'] = 'overbought'
+        else:
+            signals['bb_signal'] = 'neutral'
+
+    # ── Rate of Change (5 / 20 day) ────────────────────────────────────────────
+    if n >= 21:
+        c5 = float(closes[-6]) if closes[-6] != 0 else None
+        c20 = float(closes[-21]) if closes[-21] != 0 else None
+        if c5:
+            roc5 = (price / c5 - 1.0) * 100.0
+            signals['roc5'] = round(roc5, 2)
+            score += 8 if roc5 > 0 else -8
+        if c20:
+            roc20 = (price / c20 - 1.0) * 100.0
+            signals['roc20'] = round(roc20, 2)
+            score += 12 if roc20 > 0 else -12
+
+    # ── Volume trend ──────────────────────────────────────────────────────────
+    if len(volumes) >= 20:
+        vol_recent = float(np.mean(volumes[-5:]))
+        vol_avg = float(np.mean(volumes[-20:]))
+        if vol_avg > 0:
+            vol_ratio = vol_recent / vol_avg
+            signals['volume_ratio'] = round(vol_ratio, 2)
+            roc5_v = signals.get('roc5', 0)
+            if vol_ratio > 1.2:
+                score += 8 if roc5_v > 0 else -8
+
+    # ── Linear Regression slope (30-day) ──────────────────────────────────────
+    lookback = min(30, n)
+    if lookback >= 5:
+        x = np.arange(lookback, dtype=float)
+        y = closes[-lookback:].astype(float)
+        x_m = float(np.mean(x))
+        y_m = float(np.mean(y))
+        denom = float(np.sum((x - x_m) ** 2))
+        if denom != 0:
+            lr_slope = float(np.sum((x - x_m) * (y - y_m)) / denom)
+            lr_slope_pct = lr_slope / price * 100.0 if price else 0.0
+            signals['lr_slope_pct'] = round(lr_slope_pct, 3)
+            if lr_slope_pct > 0.1:
+                score += 10
+            elif lr_slope_pct < -0.1:
+                score -= 10
+
+    score = max(-100, min(100, score))
+    signals['composite_score'] = score
+
+    if score >= 35:
+        signals['trend'] = 'Bullish'
+        signals['trend_color'] = 'green'
+    elif score >= 10:
+        signals['trend'] = 'Mildly Bullish'
+        signals['trend_color'] = 'green'
+    elif score >= -10:
+        signals['trend'] = 'Neutral'
+        signals['trend_color'] = 'yellow'
+    elif score >= -35:
+        signals['trend'] = 'Mildly Bearish'
+        signals['trend_color'] = 'red'
+    else:
+        signals['trend'] = 'Bearish'
+        signals['trend_color'] = 'red'
+
+    # ── Price Projections ─────────────────────────────────────────────────────
+    hist_len = min(180, n)
+    if hist_len >= 20:
+        log_ret = np.diff(np.log(closes[-hist_len:].astype(float) + 1e-9))
+        daily_mu = float(np.mean(log_ret))
+        daily_vol = float(np.std(log_ret))
+        bias_scale = (score / 100.0) * daily_vol * 0.5
+        projections: dict = {}
+        for days in [7, 14, 30]:
+            exp_log_ret = daily_mu * days + bias_scale * float(np.sqrt(days))
+            proj_price = price * float(np.exp(exp_log_ret))
+            conf = daily_vol * float(np.sqrt(days))
+            proj_low = price * float(np.exp(exp_log_ret - conf))
+            proj_high = price * float(np.exp(exp_log_ret + conf))
+            projections[f'd{days}'] = {
+                'price': round(proj_price, 2),
+                'low': round(proj_low, 2),
+                'high': round(proj_high, 2),
+                'change_pct': round((proj_price / price - 1.0) * 100.0, 2),
+            }
+        signals['projections'] = projections
+        signals['daily_volatility_pct'] = round(daily_vol * 100.0, 2)
+        signals['annualized_volatility_pct'] = round(daily_vol * float(np.sqrt(252)) * 100.0, 1)
+
+    return signals
+
+
+def predict_price(ticker: str) -> dict | None:
+    """Fetch 6 months of history and return technical signals + price projections."""
+    ticker = _normalize_ticker(ticker)
+    if not ticker:
+        return None
+    cache_key = f'predict:{ticker}'
+    cached = cache_get(cache_key, TTL_QUOTE_MEDIUM)
+    if cached:
+        return cached
+    try:
+        hist = yf.Ticker(ticker).history(period='6mo', interval='1d')
+        if hist.empty or len(hist) < 20:
+            return None
+        closes = hist['Close'].values.astype(float)
+        volumes = hist['Volume'].values.astype(float)
+        result = compute_technical_signals(closes, volumes)
+        cache_set(cache_key, result)
+        return result
+    except Exception as exc:
+        print(f'[predict_price] {ticker}: {exc}')
+        return None
+
+
 def fmt_large(n) -> str:
     if n is None:
         return 'N/A'
@@ -831,6 +1049,19 @@ def api_news(ticker):
     if not safe_ticker:
         return jsonify({'error': 'Invalid ticker symbol'}), 400
     return jsonify(get_news(safe_ticker))
+
+
+@app.route('/api/predict/<ticker>')
+@login_required
+@rate_limit('api_predict', limit=30, window_seconds=60)
+def api_predict(ticker):
+    safe_ticker = _normalize_ticker(ticker)
+    if not safe_ticker:
+        return jsonify({'error': 'Invalid ticker symbol'}), 400
+    data = predict_price(safe_ticker)
+    if not data:
+        return jsonify({'error': 'Insufficient historical data for this ticker'}), 404
+    return jsonify(data)
 
 
 @app.route('/api/portfolio/data')

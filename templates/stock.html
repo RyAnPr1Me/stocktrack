@@ -230,6 +230,20 @@
   </div>
 </div>
 
+<!-- Price Forecast & Technical Analysis -->
+<div class="card forecast-card" id="forecastCard">
+  <div class="card-header">
+    <h2 class="card-title">
+      Price Forecast &amp; Technical Analysis
+      <span class="forecast-badge" id="forecastBadge">Loading…</span>
+    </h2>
+    <span class="forecast-disclaimer">For educational use only · Not financial advice</span>
+  </div>
+  <div id="forecastContent" class="forecast-loading">
+    <div class="loading-spinner"></div>
+  </div>
+</div>
+
 <!-- News -->
 <div class="card">
   <div class="card-header">
@@ -396,6 +410,116 @@ function formatDate(d) {
   try { return new Date(d).toLocaleDateString(); } catch { return d; }
 }
 
+function buildSignals(data) {
+  const chips = [];
+  if (data.rsi !== undefined) {
+    const s = data.rsi_signal || '';
+    const cls = s === 'oversold' ? 'sig-green' : s === 'overbought' ? 'sig-red'
+              : s === 'bullish'  ? 'sig-green-dim' : 'sig-red-dim';
+    chips.push(`<div class="sig-chip ${cls}">RSI ${data.rsi} · ${s}</div>`);
+  }
+  if (data.macd_cross) {
+    const cls = data.macd_cross === 'bullish' ? 'sig-green-dim' : 'sig-red-dim';
+    chips.push(`<div class="sig-chip ${cls}">MACD · ${data.macd_cross}</div>`);
+  }
+  if (data.bb_signal) {
+    const cls = data.bb_signal === 'oversold' ? 'sig-green' : data.bb_signal === 'overbought' ? 'sig-red' : 'sig-neutral';
+    const pct = data.bb_pct !== undefined ? ` ${(data.bb_pct * 100).toFixed(0)}%` : '';
+    chips.push(`<div class="sig-chip ${cls}">Bollinger${pct} · ${data.bb_signal}</div>`);
+  }
+  if (data.ma_cross_signal) {
+    const cls = data.ma_cross_signal === 'golden' ? 'sig-green-dim' : 'sig-red-dim';
+    chips.push(`<div class="sig-chip ${cls}">${data.ma_cross_signal === 'golden' ? 'Golden Cross ↑' : 'Death Cross ↓'}</div>`);
+  }
+  if (data.sma20_signal) {
+    const cls = data.sma20_signal === 'bullish' ? 'sig-green-dim' : 'sig-red-dim';
+    chips.push(`<div class="sig-chip ${cls}">SMA20 · ${data.sma20_signal}${data.sma20 ? ' $'+data.sma20 : ''}</div>`);
+  }
+  if (data.volume_ratio !== undefined) {
+    const cls = data.volume_ratio > 1.2 ? 'sig-cyan' : 'sig-neutral';
+    chips.push(`<div class="sig-chip ${cls}">Volume ${data.volume_ratio}× avg</div>`);
+  }
+  if (data.lr_slope_pct !== undefined) {
+    const cls = data.lr_slope_pct > 0 ? 'sig-green-dim' : 'sig-red-dim';
+    const arrow = data.lr_slope_pct > 0 ? '↗' : '↘';
+    chips.push(`<div class="sig-chip ${cls}">30D Trend ${arrow} ${Math.abs(data.lr_slope_pct).toFixed(2)}%/day</div>`);
+  }
+  if (data.roc20 !== undefined) {
+    const cls = data.roc20 > 0 ? 'sig-green-dim' : 'sig-red-dim';
+    chips.push(`<div class="sig-chip ${cls}">20D ROC ${data.roc20 > 0 ? '+' : ''}${data.roc20}%</div>`);
+  }
+  return chips.join('');
+}
+
+async function loadForecast() {
+  const badge = document.getElementById('forecastBadge');
+  const content = document.getElementById('forecastContent');
+  try {
+    const data = await fetch(`/api/predict/${TICKER}`).then(r => r.json());
+    if (data.error) {
+      content.innerHTML = `<p class="empty">${data.error}</p>`;
+      badge.textContent = 'N/A';
+      return;
+    }
+
+    const scoreColor = data.trend_color === 'green' ? 'var(--green)'
+                     : data.trend_color === 'red'   ? 'var(--red)'
+                     : 'var(--yellow)';
+    const scoreBarW = Math.round((data.composite_score + 100) / 2);
+
+    badge.textContent = data.trend || '';
+    badge.className = `forecast-badge trend-${data.trend_color || 'yellow'}`;
+
+    const proj = data.projections || {};
+    const projHtml = [7, 14, 30].map(d => {
+      const p = proj[`d${d}`];
+      if (!p) return '';
+      const up = p.change_pct >= 0;
+      const cls = up ? 'text-green' : 'text-red';
+      const sign = up ? '+' : '';
+      return `
+        <div class="proj-item">
+          <div class="proj-label">${d}-Day Forecast</div>
+          <div class="proj-price ${cls}">$${p.price.toFixed(2)}</div>
+          <div class="proj-change ${cls}">${sign}${p.change_pct.toFixed(2)}%</div>
+          <div class="proj-range">$${p.low.toFixed(2)} – $${p.high.toFixed(2)}</div>
+        </div>`;
+    }).join('');
+
+    const volHtml = data.annualized_volatility_pct
+      ? `<div class="vol-chip">📊 Annualized Volatility: ${data.annualized_volatility_pct}%</div>` : '';
+
+    const signalHtml = buildSignals(data);
+
+    content.innerHTML = `
+      <div class="forecast-grid">
+        <div class="forecast-left">
+          <div class="score-section">
+            <div class="score-label">Composite Signal Score</div>
+            <div class="score-meter-track">
+              <div class="score-meter-fill" style="width:${scoreBarW}%;background:${scoreColor}"></div>
+            </div>
+            <div class="score-meter-labels">
+              <span>Bearish</span><span>Neutral</span><span>Bullish</span>
+            </div>
+            <div class="score-value" style="color:${scoreColor}">
+              ${data.composite_score > 0 ? '+' : ''}${data.composite_score} / 100
+            </div>
+          </div>
+          ${volHtml}
+        </div>
+        <div class="forecast-right">
+          <div class="proj-grid">${projHtml}</div>
+        </div>
+      </div>
+      ${signalHtml ? `<div class="signals-grid">${signalHtml}</div>` : ''}
+    `;
+  } catch (_) {
+    content.innerHTML = '<p class="empty">Failed to load forecast data.</p>';
+    badge.textContent = 'Error';
+  }
+}
+
 function expandAbout(event) {
   document.getElementById('aboutText').textContent =
     document.getElementById('aboutFull').textContent;
@@ -412,5 +536,6 @@ function removeFromWatchlist() {
 
 loadChart('1mo');
 loadNews();
+loadForecast();
 </script>
 {% endblock %}
