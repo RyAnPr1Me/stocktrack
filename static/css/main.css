@@ -394,6 +394,61 @@ a:hover { color: var(--accent-hover); }
 .card-link { font-size: 0.82rem; color: var(--accent); }
 .card-link:hover { text-decoration: underline; }
 .card-meta { font-size: 0.8rem; color: var(--text-muted); }
+.compact-card { margin-bottom: 14px; }
+
+.table-toolbar {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+  padding: 14px 16px;
+  flex-wrap: wrap;
+}
+
+.table-toolbar-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 220px;
+}
+
+.table-toolbar-group label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.toolbar-input,
+.toolbar-select {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 0.84rem;
+}
+
+.toolbar-input:focus,
+.toolbar-select:focus {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.16);
+}
+
+.toolbar-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  padding: 6px 2px;
+}
+
+.table-note {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-top: 3px;
+}
 
 /* ── Stat cards ───────────────────────────────────────────────────────────── */
 .stats-grid {
@@ -401,6 +456,8 @@ a:hover { color: var(--accent-hover); }
   grid-template-columns: repeat(4, 1fr);
   gap: 14px;
   margin-bottom: 20px;
+  .table-toolbar { align-items: stretch; }
+  .table-toolbar-group { min-width: 100%; }
 }
 
 .stat-card {

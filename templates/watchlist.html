@@ -16,6 +16,28 @@
   </button>
 </div>
 
+<div class="card compact-card">
+  <div class="table-toolbar">
+    <div class="table-toolbar-group">
+      <label for="watchSearch">Search watchlist</label>
+      <input id="watchSearch" class="toolbar-input" type="search" placeholder="Ticker or company" />
+    </div>
+    <div class="table-toolbar-group">
+      <label for="watchSort">Sort by</label>
+      <select id="watchSort" class="toolbar-select">
+        <option value="change_desc">% change (high → low)</option>
+        <option value="volume_desc">Volume (high → low)</option>
+        <option value="name_asc">Name (A → Z)</option>
+        <option value="ticker_asc">Ticker (A → Z)</option>
+      </select>
+    </div>
+    <label class="toolbar-check">
+      <input id="watchAlertsOnly" type="checkbox" />
+      Alerts only
+    </label>
+  </div>
+</div>
+
 <div class="card">
   <div class="card-header">
     <h2 class="card-title">Tracked Stocks</h2>
@@ -107,31 +129,68 @@
 
 {% block scripts %}
 <script>
+let watchlistData = [];
+
 async function loadWatchlist() {
   const payload = await fetch('/api/watchlist/data').then(r => r.json());
-  const data = payload.items || [];
+  watchlistData = payload.items || [];
+  renderTriggeredAlerts(payload.triggered_alerts || []);
+  applyWatchlistView();
+}
+
+function renderTriggeredAlerts(triggered) {
+  document.querySelectorAll('.watch-triggered-flash').forEach(el => el.remove());
+  if (!triggered.length) return;
+  const preview = triggered.slice(0, 3);
+  const summary = preview.map(a => `${a.ticker} (${a.direction} $${fmtNum(a.target_price)})`).join(', ');
+  const suffix = triggered.length > preview.length ? `, and ${triggered.length - preview.length} more` : '';
+  const container = document.createElement('div');
+  container.className = 'flash info watch-triggered-flash';
+  container.textContent = `Triggered alerts: ${summary}${suffix}`;
+  document.querySelector('.page-header')?.after(container);
+  setTimeout(() => container.remove(), 5000);
+}
+
+function applyWatchlistView() {
+  const query = (document.getElementById('watchSearch')?.value || '').trim().toLowerCase();
+  const sortBy = document.getElementById('watchSort')?.value || 'change_desc';
+  const alertsOnly = !!document.getElementById('watchAlertsOnly')?.checked;
+  let data = [...watchlistData];
+
+  if (query) {
+    data = data.filter(w =>
+      w.ticker.toLowerCase().includes(query) ||
+      (w.name || '').toLowerCase().includes(query)
+    );
+  }
+  if (alertsOnly) {
+    data = data.filter(w => (w.alerts || []).length > 0);
+  }
+
+  data.sort((a, b) => {
+    if (sortBy === 'volume_desc') return (b.volume || 0) - (a.volume || 0);
+    if (sortBy === 'name_asc') return (a.name || '').localeCompare(b.name || '');
+    if (sortBy === 'ticker_asc') return (a.ticker || '').localeCompare(b.ticker || '');
+    return (b.change_pct || 0) - (a.change_pct || 0);
+  });
+
+  renderWatchlistTable(data);
+}
+
+function renderWatchlistTable(data) {
   const body = document.getElementById('watchBody');
   document.getElementById('watchCount').textContent =
     data.length + ' stock' + (data.length !== 1 ? 's' : '');
 
   if (!data.length) {
+    const hasQuery = (document.getElementById('watchSearch')?.value || '').trim().length > 0
+      || !!document.getElementById('watchAlertsOnly')?.checked;
     body.innerHTML = `<tr><td colspan="12" class="empty-cell">
-      Your watchlist is empty.
-      <a href="#" onclick="openModal('addWatchModal');return false;">Add a stock</a>
+      ${hasQuery
+        ? 'No matching stocks. <a href="#" onclick="resetWatchFilters();return false;">Clear filters</a>'
+        : 'Your watchlist is empty. <a href="#" onclick="openModal(\'addWatchModal\');return false;">Add a stock</a>'}
     </td></tr>`;
     return;
-  }
-
-  const triggered = payload.triggered_alerts || [];
-  if (triggered.length) {
-    const preview = triggered.slice(0, 3);
-    const summary = preview.map(a => `${a.ticker} (${a.direction} $${fmtNum(a.target_price)})`).join(', ');
-    const suffix = triggered.length > preview.length ? `, and ${triggered.length - preview.length} more` : '';
-    const container = document.createElement('div');
-    container.className = 'flash info';
-    container.textContent = `Triggered alerts: ${summary}${suffix}`;
-    document.querySelector('.page-header')?.after(container);
-    setTimeout(() => container.remove(), 5000);
   }
 
   body.innerHTML = '';
@@ -208,6 +267,13 @@ function renderRowsInChunks(chunks, body, renderFn, index = 0) {
   requestAnimationFrame(() => renderRowsInChunks(chunks, body, renderFn, index + 1));
 }
 
+function resetWatchFilters() {
+  document.getElementById('watchSearch').value = '';
+  document.getElementById('watchAlertsOnly').checked = false;
+  document.getElementById('watchSort').value = 'change_desc';
+  applyWatchlistView();
+}
+
 function fmtVolume(v) {
   if (!v) return '—';
   if (v >= 1e9) return (v/1e9).toFixed(1) + 'B';
@@ -225,5 +291,8 @@ function fmtCap(v) {
 }
 
 loadWatchlist();
+document.getElementById('watchSearch')?.addEventListener('input', applyWatchlistView);
+document.getElementById('watchSort')?.addEventListener('change', applyWatchlistView);
+document.getElementById('watchAlertsOnly')?.addEventListener('change', applyWatchlistView);
 </script>
 {% endblock %}

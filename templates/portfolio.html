@@ -24,6 +24,24 @@
   <div class="stat-card skeleton-card"></div>
 </div>
 
+<div class="card compact-card">
+  <div class="table-toolbar">
+    <div class="table-toolbar-group">
+      <label for="portfolioSearch">Search holdings</label>
+      <input id="portfolioSearch" class="toolbar-input" type="search" placeholder="Ticker, company, or note" />
+    </div>
+    <div class="table-toolbar-group">
+      <label for="portfolioSort">Sort by</label>
+      <select id="portfolioSort" class="toolbar-select">
+        <option value="value_desc">Market value (high → low)</option>
+        <option value="gain_desc">Gain % (high → low)</option>
+        <option value="day_desc">Day gain (high → low)</option>
+        <option value="ticker_asc">Ticker (A → Z)</option>
+      </select>
+    </div>
+  </div>
+</div>
+
 <!-- Charts + Table -->
 <div class="section-row">
   <div style="flex:0 0 280px">
@@ -140,12 +158,13 @@
 {% block scripts %}
 <script>
 let allocationChart = null;
+let portfolioData = [];
 
 async function loadPortfolio() {
   const data = await fetch('/api/portfolio/data').then(r => r.json());
+  portfolioData = data.positions || [];
   renderStats(data);
-  renderTable(data.positions);
-  renderAllocation(data.positions);
+  applyPortfolioView();
 }
 
 function renderStats(d) {
@@ -190,8 +209,10 @@ function renderTable(positions) {
   document.getElementById('holdingsCount').textContent =
     positions.length + ' position' + (positions.length !== 1 ? 's' : '');
   if (!positions.length) {
+    const hasQuery = (document.getElementById('portfolioSearch')?.value || '').trim().length > 0;
     body.innerHTML = `<tr><td colspan="10" class="empty-cell">
-      No positions yet. <a href="#" onclick="openModal('addPositionModal');return false;">Add one</a>
+      ${hasQuery ? 'No matching positions. <a href="#" onclick="document.getElementById(\'portfolioSearch\').value=\'\';applyPortfolioView();return false;">Clear filters</a>'
+      : 'No positions yet. <a href="#" onclick="openModal(\'addPositionModal\');return false;">Add one</a>'}
     </td></tr>`;
     return;
   }
@@ -201,7 +222,10 @@ function renderTable(positions) {
   renderRowsInChunks(chunks, body, rows => rows.map(p => `
     <tr>
       <td><a href="/stock/${p.ticker}" class="ticker-link">${p.ticker}</a></td>
-      <td class="name-cell">${truncate(p.name, 24)}</td>
+      <td class="name-cell">
+        <div>${truncate(p.name, 24)}</div>
+        ${p.notes ? `<div class="table-note" title="${escapeHtml(p.notes)}">${escapeHtml(truncate(p.notes, 42))}</div>` : ''}
+      </td>
       <td class="num">${p.shares % 1 ? p.shares.toFixed(4) : p.shares}</td>
       <td class="num">$${p.avg_cost.toFixed(2)}</td>
       <td class="num">$${fmtNum(p.current_price)}</td>
@@ -236,6 +260,40 @@ function renderTable(positions) {
       </td>
     </tr>
   `).join(''));
+}
+
+function escapeHtml(str) {
+  return (str || '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  })[c]);
+}
+
+function applyPortfolioView() {
+  const query = (document.getElementById('portfolioSearch')?.value || '').trim().toLowerCase();
+  const sortBy = document.getElementById('portfolioSort')?.value || 'value_desc';
+  let rows = [...portfolioData];
+
+  if (query) {
+    rows = rows.filter(p =>
+      p.ticker.toLowerCase().includes(query) ||
+      (p.name || '').toLowerCase().includes(query) ||
+      (p.notes || '').toLowerCase().includes(query)
+    );
+  }
+
+  rows.sort((a, b) => {
+    if (sortBy === 'gain_desc') return (b.gain_pct || 0) - (a.gain_pct || 0);
+    if (sortBy === 'day_desc') return (b.day_gain || 0) - (a.day_gain || 0);
+    if (sortBy === 'ticker_asc') return (a.ticker || '').localeCompare(b.ticker || '');
+    return (b.market_value || 0) - (a.market_value || 0);
+  });
+
+  renderTable(rows);
+  renderAllocation(rows);
 }
 
 function renderRowsInChunks(chunks, body, renderFn, index = 0) {
@@ -296,5 +354,7 @@ function renderAllocation(positions) {
 }
 
 loadPortfolio();
+document.getElementById('portfolioSearch')?.addEventListener('input', applyPortfolioView);
+document.getElementById('portfolioSort')?.addEventListener('change', applyPortfolioView);
 </script>
 {% endblock %}
