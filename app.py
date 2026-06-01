@@ -7,6 +7,7 @@ from functools import wraps
 
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
 from flask import (Flask, abort, flash, jsonify, redirect,
                    render_template, request, url_for)
@@ -217,6 +218,7 @@ POPULAR_TICKERS = [
     'JPM', 'V', 'UNH', 'JNJ', 'WMT', 'PG', 'MA', 'HD', 'DIS',
     'INTC', 'AMD', 'CRM', 'NFLX', 'ADBE', 'ORCL', 'CSCO', 'PYPL',
 ]
+YAHOO_SEARCH_URL = 'https://query1.finance.yahoo.com/v1/finance/search'
 
 
 # ── yFinance helpers ───────────────────────────────────────────────────────────
@@ -322,6 +324,51 @@ def get_quotes_map(tickers: list[str], ttl: int = TTL_QUOTE_FAST) -> dict[str, d
         if q:
             result[t] = q
     return result
+
+
+def get_symbol_suggestions(query: str, limit: int = 20) -> list[dict]:
+    q = (query or '').strip()
+    if not q:
+        return []
+    cache_key = f'suggest:{q.upper()}'
+    cached = cache_get(cache_key, ttl=TTL_QUOTE_MEDIUM)
+    if cached is not None:
+        return cached
+
+    try:
+        resp = requests.get(
+            YAHOO_SEARCH_URL,
+            params={'q': q, 'quotesCount': min(50, max(10, limit * 3)), 'newsCount': 0},
+            headers={'User-Agent': 'stocktrack/1.0'},
+            timeout=4,
+        )
+        resp.raise_for_status()
+        payload = resp.json() or {}
+    except Exception as exc:
+        print(f'[get_symbol_suggestions] {q}: {exc}')
+        return []
+
+    out = []
+    seen = set()
+    allowed_types = {'EQUITY', 'ETF', 'MUTUALFUND'}
+    for item in payload.get('quotes') or []:
+        ticker = _normalize_ticker(item.get('symbol') or '')
+        if not ticker or ticker in seen:
+            continue
+        quote_type = (item.get('quoteType') or '').upper()
+        if quote_type and quote_type not in allowed_types:
+            continue
+        seen.add(ticker)
+        out.append({
+            'ticker': ticker,
+            'name': (item.get('shortname') or item.get('longname') or ticker).strip(),
+            'exchange': item.get('exchange') or item.get('exchDisp') or '',
+        })
+        if len(out) >= limit:
+            break
+
+    cache_set(cache_key, out)
+    return out
 
 
 def _sma_array(values: list, period: int) -> list:
@@ -1491,12 +1538,15 @@ def api_search():
     if safe_query_ticker:
         tickers.add(safe_query_ticker)
 
+    suggestions = get_symbol_suggestions(q_raw, limit=15)
+    for item in suggestions:
+        tickers.add(item['ticker'])
+
     quote_map = get_quotes_map(list(tickers), ttl=TTL_QUOTE_FAST)
-    results = []
+    results_by_ticker: dict[str, dict] = {}
     q_lower = q_raw.lower()
-    for q in quote_map.values():
-        ticker = q['ticker']
-        name = (q.get('name') or '').strip()
+
+    def add_result(ticker: str, name: str, price=None, change_pct=None, sector='', exchange=''):
         t_low = ticker.lower()
         n_low = name.lower()
         score = 0
@@ -1514,17 +1564,51 @@ def api_search():
             score += 45
 
         if score <= 0:
-            continue
-        results.append({
+            return
+
+        existing = results_by_ticker.get(ticker)
+        candidate = {
             'ticker': ticker,
             'name': name or ticker,
-            'price': q['price'],
-            'change_pct': q['change_pct'],
-            'sector': q.get('sector', ''),
-            'exchange': q.get('exchange', ''),
+            'price': price,
+            'change_pct': change_pct,
+            'sector': sector,
+            'exchange': exchange,
             'score': score,
-        })
+        }
+        has_price = candidate['price'] is not None
+        existing_has_price = existing is not None and existing.get('price') is not None
+        if (
+            existing is None
+            or candidate['score'] > existing['score']
+            or (candidate['score'] == existing['score'] and has_price and not existing_has_price)
+        ):
+            results_by_ticker[ticker] = candidate
 
+    for q in quote_map.values():
+        add_result(
+            ticker=q['ticker'],
+            name=(q.get('name') or '').strip() or q['ticker'],
+            price=q.get('price'),
+            change_pct=q.get('change_pct'),
+            sector=q.get('sector', ''),
+            exchange=q.get('exchange', ''),
+        )
+
+    for item in suggestions:
+        ticker = item['ticker']
+        if ticker in quote_map:
+            continue
+        add_result(
+            ticker=ticker,
+            name=item.get('name') or ticker,
+            price=None,
+            change_pct=None,
+            sector='',
+            exchange=item.get('exchange', ''),
+        )
+
+    results = list(results_by_ticker.values())
     results.sort(key=lambda r: (-r['score'], r['ticker']))
     ranked = [{k: v for k, v in item.items() if k != 'score'} for item in results[:15]]
     cache_set(f'search:{q_upper}', ranked)

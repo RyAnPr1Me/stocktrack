@@ -104,8 +104,8 @@ async function doSearch() {
                   <td class="text-muted">${r.exchange || '—'}</td>
                   <td class="num">$${fmtNum(r.price)}</td>
                   <td class="num">
-                    <span class="badge ${r.change_pct >= 0 ? 'badge-up' : 'badge-down'}">
-                      ${fmtPct(r.change_pct)}
+                    <span class="badge ${(r.change_pct ?? 0) >= 0 ? 'badge-up' : 'badge-down'}">
+                      ${r.change_pct === null || r.change_pct === undefined ? '—' : fmtPct(r.change_pct)}
                     </span>
                   </td>
                   <td>

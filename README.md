@@ -12,7 +12,7 @@ A comprehensive stock portfolio tracking web app with a Google-style dark mode U
 | **Stock Detail** | Multi-timeframe price charts, key statistics, valuation, financials, analyst consensus, company info, latest news |
 | **Watchlist + Alerts** | Track stocks with price, change, volume, market cap, P/E, 52-week range bar, and price alerts (above/below) |
 | **Markets** | Major indices ticker cards, sector ETF heatmap grid, sector comparison bar chart, top movers table |
-| **Search** | Ranked live search by ticker and company-name matching with improved relevance |
+| **Search** | Ranked live search by ticker and company-name matching with expanded symbol discovery and improved relevance |
 | **Auth** | Register, login, persistent sessions, per-user portfolio & watchlist |
 
 ## Tech Stack
