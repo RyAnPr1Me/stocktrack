@@ -102,10 +102,10 @@ async function doSearch() {
                   <td class="name-cell">${r.name || '—'}</td>
                   <td><span class="sector-pill-sm">${r.sector || '—'}</span></td>
                   <td class="text-muted">${r.exchange || '—'}</td>
-                  <td class="num">$${fmtNum(r.price)}</td>
+                  <td class="num">${(r.price ?? null) === null ? '—' : '$' + fmtNum(r.price)}</td>
                   <td class="num">
                     <span class="badge ${(r.change_pct ?? 0) >= 0 ? 'badge-up' : 'badge-down'}">
-                      ${r.change_pct === null || r.change_pct === undefined ? '—' : fmtPct(r.change_pct)}
+                      ${(r.change_pct ?? null) === null ? '—' : fmtPct(r.change_pct)}
                     </span>
                   </td>
                   <td>
