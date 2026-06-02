@@ -119,3 +119,106 @@ if (window.Chart) {
   Chart.defaults.plugins.tooltip.padding = 10;
   Chart.defaults.plugins.tooltip.cornerRadius = 8;
 }
+
+// ── Topbar search autocomplete ───────────────────────────────────────────────
+(function () {
+  const input = document.getElementById('topbarSearchInput');
+  const drop  = document.getElementById('searchSuggestDrop');
+  const form  = document.getElementById('topbarSearchForm');
+  if (!input || !drop) return;
+
+  let debounceTimer = null;
+  let focusedIdx = -1;
+
+  function closeDrop() {
+    drop.classList.remove('open');
+    drop.innerHTML = '';
+    focusedIdx = -1;
+  }
+
+  function openDrop(items) {
+    drop.innerHTML = '';
+    focusedIdx = -1;
+    if (!items.length) {
+      drop.innerHTML = '<div class="suggest-no-results">No results found</div>';
+      drop.classList.add('open');
+      return;
+    }
+    items.slice(0, 7).forEach((item, i) => {
+      const el = document.createElement('a');
+      el.className = 'suggest-item';
+      el.href = `/stock/${item.ticker}`;
+      el.setAttribute('role', 'option');
+      el.setAttribute('data-idx', i);
+      const chgCls  = (item.change_pct || 0) >= 0 ? 'text-green' : 'text-red';
+      const chgStr  = item.change_pct !== null && item.change_pct !== undefined
+        ? `<span class="suggest-chg ${chgCls}">${fmtPct(item.change_pct)}</span>` : '';
+      const priceStr = item.price !== null && item.price !== undefined
+        ? `<span class="suggest-price">$${fmtNum(item.price)}</span>` : '';
+      el.innerHTML = `
+        <span class="suggest-ticker">${item.ticker}</span>
+        <span class="suggest-name">${truncate(item.name || item.ticker, 30)}</span>
+        ${priceStr}${chgStr}
+      `;
+      el.addEventListener('mousedown', e => {
+        e.preventDefault();
+        window.location.href = `/stock/${item.ticker}`;
+      });
+      drop.appendChild(el);
+    });
+    drop.classList.add('open');
+  }
+
+  function setFocus(idx) {
+    const items = drop.querySelectorAll('.suggest-item');
+    items.forEach(el => el.classList.remove('focused'));
+    if (idx >= 0 && idx < items.length) {
+      items[idx].classList.add('focused');
+      focusedIdx = idx;
+    } else {
+      focusedIdx = -1;
+    }
+  }
+
+  input.addEventListener('input', () => {
+    clearTimeout(debounceTimer);
+    const q = input.value.trim();
+    if (!q) { closeDrop(); return; }
+    debounceTimer = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+        const data = await res.json();
+        if (Array.isArray(data)) openDrop(data);
+      } catch (_) { closeDrop(); }
+    }, 280);
+  });
+
+  input.addEventListener('keydown', e => {
+    const items = drop.querySelectorAll('.suggest-item');
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setFocus(Math.min(focusedIdx + 1, items.length - 1));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setFocus(Math.max(focusedIdx - 1, -1));
+    } else if (e.key === 'Enter' && focusedIdx >= 0) {
+      e.preventDefault();
+      const focused = items[focusedIdx];
+      if (focused) window.location.href = focused.href;
+    } else if (e.key === 'Escape') {
+      closeDrop();
+    }
+  });
+
+  input.addEventListener('focus', () => {
+    if (input.value.trim() && drop.children.length) drop.classList.add('open');
+  });
+
+  input.addEventListener('blur', () => {
+    setTimeout(closeDrop, 180);
+  });
+
+  document.addEventListener('click', e => {
+    if (!form.contains(e.target)) closeDrop();
+  });
+})();

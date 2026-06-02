@@ -67,6 +67,14 @@
           </svg>
           <span>Watchlist</span>
         </a>
+        <a href="{{ url_for('trades') }}"
+           class="nav-item {% if request.endpoint == 'trades' %}active{% endif %}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M3 3h18v4H3zM3 10h18v11H3z"/>
+            <line x1="9" y1="14" x2="9" y2="18"/><line x1="15" y1="14" x2="15" y2="18"/>
+          </svg>
+          <span>Trades</span>
+        </a>
         <a href="{{ url_for('market') }}"
            class="nav-item {% if request.endpoint == 'market' %}active{% endif %}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -113,13 +121,16 @@
             <line x1="3" y1="18" x2="21" y2="18"/>
           </svg>
         </button>
-        <form class="topbar-search" action="{{ url_for('search') }}" method="get">
+        <form class="topbar-search" action="{{ url_for('search') }}" method="get"
+              id="topbarSearchForm" autocomplete="off">
           <svg class="search-icon" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="2">
             <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
           </svg>
-          <input type="text" name="q" placeholder="Search ticker or company…"
+          <input type="text" name="q" id="topbarSearchInput"
+                 placeholder="Search ticker or company…"
                  value="{{ request.args.get('q','') }}" autocomplete="off" />
+          <div class="search-suggest" id="searchSuggestDrop" role="listbox"></div>
         </form>
         <div class="topbar-right">
           <div class="market-status" id="marketStatus">

@@ -1,0 +1,227 @@
+{% extends "base.html" %}
+{% block title %}Trade History — StockTrack{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Trade History</h1>
+    <p class="page-sub">All buy and sell transactions with realized P&amp;L</p>
+  </div>
+  <a href="{{ url_for('portfolio') }}" class="btn btn-ghost btn-sm">← Portfolio</a>
+</div>
+
+<!-- Summary stats -->
+<div class="stats-grid" id="tradeStats">
+  <div class="stat-card skeleton-card"></div>
+  <div class="stat-card skeleton-card"></div>
+  <div class="stat-card skeleton-card"></div>
+  <div class="stat-card skeleton-card"></div>
+</div>
+
+<!-- Cumulative P&L chart (shown only when sell trades exist) -->
+<div class="card" id="pnlChartCard" style="display:none">
+  <div class="card-header">
+    <h2 class="card-title">Cumulative Realized P&amp;L</h2>
+  </div>
+  <div class="chart-container" style="height:220px">
+    <canvas id="pnlChart"></canvas>
+  </div>
+</div>
+
+<!-- Filter toolbar -->
+<div class="card compact-card">
+  <div class="table-toolbar">
+    <div class="table-toolbar-group">
+      <label for="tradeSearch">Filter by ticker</label>
+      <input id="tradeSearch" class="toolbar-input" type="search" placeholder="e.g. AAPL" />
+    </div>
+    <div class="table-toolbar-group">
+      <label for="tradeSide">Side</label>
+      <select id="tradeSide" class="toolbar-select">
+        <option value="all">All</option>
+        <option value="BUY">Buy only</option>
+        <option value="SELL">Sell only</option>
+      </select>
+    </div>
+  </div>
+</div>
+
+<!-- Trade table -->
+<div class="card">
+  <div class="card-header">
+    <h2 class="card-title">Transactions</h2>
+    <span class="card-meta" id="tradeCount"></span>
+  </div>
+  <div class="table-wrap">
+    <table class="data-table" id="tradeTable">
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Ticker</th>
+          <th>Side</th>
+          <th class="num">Shares</th>
+          <th class="num">Price</th>
+          <th class="num">Total Value</th>
+          <th class="num">Realized P&amp;L</th>
+        </tr>
+      </thead>
+      <tbody id="tradeBody">
+        <tr><td colspan="7" class="loading-cell">Loading trades…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let allTrades = [];
+let pnlChart = null;
+
+async function loadTrades() {
+  try {
+    const data = await fetch('/api/trades/data').then(r => r.json());
+    allTrades = data.trades || [];
+    renderStats(data.summary || {});
+    if (data.cumulative_pnl && data.cumulative_pnl.length > 1) {
+      renderPnlChart(data.cumulative_pnl);
+    }
+    applyTradeFilters();
+  } catch (_) {
+    document.getElementById('tradeBody').innerHTML =
+      '<tr><td colspan="7" class="empty-cell">Failed to load trade data.</td></tr>';
+  }
+}
+
+function renderStats(s) {
+  const pnl = s.total_realized_pnl || 0;
+  document.getElementById('tradeStats').innerHTML = `
+    <div class="stat-card">
+      <div class="stat-label">Total Trades</div>
+      <div class="stat-value">${s.total_trades || 0}</div>
+      <div class="stat-change neutral">Transactions recorded</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Buys / Sells</div>
+      <div class="stat-value">${s.buy_count || 0} <span style="color:var(--text-muted);font-size:1rem">/</span> ${s.sell_count || 0}</div>
+      <div class="stat-change neutral">Buy vs sell count</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Total Invested</div>
+      <div class="stat-value">$${fmtNum(s.total_invested || 0)}</div>
+      <div class="stat-change neutral">Gross buy value</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Realized P&amp;L</div>
+      <div class="stat-value ${pnl >= 0 ? 'text-green' : 'text-red'}">
+        ${pnl >= 0 ? '+' : ''}$${fmtNum(Math.abs(pnl))}
+      </div>
+      <div class="stat-change ${pnl >= 0 ? 'up' : 'down'}">From closed positions</div>
+    </div>
+  `;
+}
+
+function renderPnlChart(data) {
+  document.getElementById('pnlChartCard').style.display = '';
+  const labels = data.map(d => d.date);
+  const values = data.map(d => d.cumulative_pnl);
+  const last = values[values.length - 1] || 0;
+  const color = last >= 0 ? '#10b981' : '#ef4444';
+  const ctx = document.getElementById('pnlChart').getContext('2d');
+  if (pnlChart) pnlChart.destroy();
+  pnlChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Cumulative P&L',
+        data: values,
+        borderColor: color,
+        backgroundColor: last >= 0 ? 'rgba(16,185,129,0.08)' : 'rgba(239,68,68,0.08)',
+        borderWidth: 2,
+        fill: true,
+        pointRadius: data.length <= 30 ? 3 : 0,
+        pointHoverRadius: 4,
+        tension: 0.3,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1c1c2e',
+          titleColor: '#e2e8f0',
+          bodyColor: '#94a3b8',
+          borderColor: 'rgba(99,102,241,0.3)',
+          borderWidth: 1,
+          callbacks: {
+            label: c => ` ${c.raw >= 0 ? '+' : ''}$${fmtNum(c.raw)}`
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: 'rgba(255,255,255,0.04)' },
+          ticks: { color: '#64748b', maxTicksLimit: 8, maxRotation: 0, font: { size: 11 } }
+        },
+        y: {
+          grid: { color: 'rgba(255,255,255,0.04)' },
+          ticks: { color: '#64748b', font: { size: 11 },
+                   callback: v => '$' + fmtNum(v) }
+        },
+      },
+      animation: { duration: 300 },
+    }
+  });
+}
+
+function applyTradeFilters() {
+  const query = (document.getElementById('tradeSearch')?.value || '').trim().toUpperCase();
+  const side  = document.getElementById('tradeSide')?.value || 'all';
+  const rows  = allTrades.filter(t =>
+    (!query || t.ticker.includes(query)) &&
+    (side === 'all' || t.side === side)
+  );
+  renderTradeTable(rows);
+}
+
+function renderTradeTable(rows) {
+  const body = document.getElementById('tradeBody');
+  document.getElementById('tradeCount').textContent =
+    rows.length + ' transaction' + (rows.length !== 1 ? 's' : '');
+  if (!rows.length) {
+    const hasFilter = (document.getElementById('tradeSearch')?.value || '').trim().length > 0
+      || document.getElementById('tradeSide')?.value !== 'all';
+    body.innerHTML = `<tr><td colspan="7" class="empty-cell">
+      ${hasFilter
+        ? 'No matching trades.'
+        : 'No trades recorded yet. Buy or sell positions from the <a href="/portfolio">Portfolio</a> page.'}
+    </td></tr>`;
+    return;
+  }
+  body.innerHTML = rows.map(t => {
+    const pnlCell = t.side === 'SELL' && t.realized_pnl !== null
+      ? `<span class="${t.realized_pnl >= 0 ? 'text-green' : 'text-red'}">${t.realized_pnl >= 0 ? '+' : ''}$${fmtNum(Math.abs(t.realized_pnl))}</span>`
+      : '<span class="text-muted">—</span>';
+    return `
+      <tr>
+        <td>${t.created_at}</td>
+        <td><a href="/stock/${t.ticker}" class="ticker-link">${t.ticker}</a></td>
+        <td><span class="side-badge ${t.side === 'BUY' ? 'side-buy' : 'side-sell'}">${t.side}</span></td>
+        <td class="num">${t.shares % 1 ? t.shares.toFixed(4) : t.shares}</td>
+        <td class="num">$${t.price.toFixed(2)}</td>
+        <td class="num">$${fmtNum(t.total_value)}</td>
+        <td class="num">${pnlCell}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+loadTrades();
+document.getElementById('tradeSearch')?.addEventListener('input', applyTradeFilters);
+document.getElementById('tradeSide')?.addEventListener('change', applyTradeFilters);
+</script>
+{% endblock %}

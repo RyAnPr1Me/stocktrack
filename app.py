@@ -410,6 +410,7 @@ def get_chart_data(ticker: str, period: str = '1mo') -> dict | None:
             'volume': [int(v) for v in hist['Volume']],
             'sma20':  _sma_array(closes, 20),
             'sma50':  _sma_array(closes, 50),
+            'sma200': _sma_array(closes, 200),
         }
         cache_set(key, data)
         return data
@@ -1202,6 +1203,12 @@ def search():
     return render_template('search.html', query=request.args.get('q', ''))
 
 
+@app.route('/trades')
+@login_required
+def trades():
+    return render_template('trades.html')
+
+
 # ── API routes ─────────────────────────────────────────────────────────────────
 @app.route('/api/quote/<ticker>')
 @login_required
@@ -1324,6 +1331,14 @@ def api_portfolio_data():
     day_gain = sum(r['day_gain'] for r in rows)
     prev_value = total_value - day_gain
     day_pct = (day_gain / prev_value * 100) if prev_value else 0
+    sector_map: dict[str, float] = {}
+    for row in rows:
+        sector = row.get('sector') or 'Unknown'
+        sector_map[sector] = round(sector_map.get(sector, 0.0) + row['market_value'], 2)
+    sector_breakdown = sorted(
+        [{'sector': k, 'value': v} for k, v in sector_map.items()],
+        key=lambda x: x['value'], reverse=True,
+    )
     return jsonify({
         'positions': rows,
         'total_value': round(total_value, 2),
@@ -1337,6 +1352,7 @@ def api_portfolio_data():
             'day_gain': round(day_gain, 2),
             'day_gain_pct': round(day_pct, 2),
         },
+        'sector_breakdown': sector_breakdown,
     })
 
 
@@ -1613,6 +1629,55 @@ def api_search():
     ranked = [{k: v for k, v in item.items() if k != 'score'} for item in results[:15]]
     cache_set(f'search:{q_upper}', ranked)
     return jsonify(ranked)
+
+
+@app.route('/api/trades/data')
+@login_required
+@rate_limit('api_trades', limit=60, window_seconds=60)
+def api_trades_data():
+    trade_list = Trade.query.filter_by(user_id=current_user.id).order_by(
+        Trade.created_at.desc()
+    ).all()
+    rows = []
+    for t in trade_list:
+        rows.append({
+            'id': t.id,
+            'ticker': t.ticker,
+            'side': t.side,
+            'shares': t.shares,
+            'price': round(t.price, 2),
+            'total_value': round(t.shares * t.price, 2),
+            'realized_pnl': round(t.realized_pnl, 2) if t.realized_pnl is not None else None,
+            'created_at': t.created_at.strftime('%Y-%m-%d %H:%M'),
+        })
+    total_realized_pnl = sum(
+        r['realized_pnl'] for r in rows if r['realized_pnl'] is not None
+    )
+    sell_trades_asc = sorted(
+        [t for t in trade_list if t.side == 'SELL'],
+        key=lambda x: x.created_at,
+    )
+    cumulative: list[dict] = []
+    running = 0.0
+    for t in sell_trades_asc:
+        if t.realized_pnl is not None:
+            running += t.realized_pnl
+            cumulative.append({
+                'date': t.created_at.strftime('%Y-%m-%d'),
+                'cumulative_pnl': round(running, 2),
+            })
+    return jsonify({
+        'trades': rows,
+        'summary': {
+            'total_trades': len(rows),
+            'buy_count': sum(1 for r in rows if r['side'] == 'BUY'),
+            'sell_count': sum(1 for r in rows if r['side'] == 'SELL'),
+            'total_realized_pnl': round(total_realized_pnl, 2),
+            'total_invested': round(sum(r['total_value'] for r in rows if r['side'] == 'BUY'), 2),
+            'total_proceeds': round(sum(r['total_value'] for r in rows if r['side'] == 'SELL'), 2),
+        },
+        'cumulative_pnl': cumulative,
+    })
 
 
 @app.route('/api/alerts/data')

@@ -68,6 +68,7 @@
       <div class="sma-toggles" id="smaToggles">
         <button class="sma-btn" data-sma="20" title="SMA 20">SMA 20</button>
         <button class="sma-btn" data-sma="50" title="SMA 50">SMA 50</button>
+        <button class="sma-btn" data-sma="200" title="SMA 200">SMA 200</button>
       </div>
     </div>
   </div>
@@ -391,7 +392,7 @@ const TICKER = '{{ quote.ticker }}';
 let priceChart = null;
 let currentType = 'line';
 let currentPeriod = '1mo';
-let smaActive = { 20: false, 50: false };
+let smaActive = { 20: false, 50: false, 200: false };
 let lastChartData = null;
 const SMA_LINE_WIDTH = 1.5;
 
@@ -477,8 +478,9 @@ function drawOhlcChart(ctx, data) {
 
 function drawSmaOverlay(ctx, data, xOf, yOf) {
   const smaDefs = [
-    { key: 'sma20', color: '#f59e0b', label: 'SMA20', active: smaActive[20] },
-    { key: 'sma50', color: '#8b5cf6', label: 'SMA50', active: smaActive[50] },
+    { key: 'sma20',  color: '#f59e0b', label: 'SMA20',  active: smaActive[20]  },
+    { key: 'sma50',  color: '#8b5cf6', label: 'SMA50',  active: smaActive[50]  },
+    { key: 'sma200', color: '#06b6d4', label: 'SMA200', active: smaActive[200] },
   ];
   for (const def of smaDefs) {
     if (!def.active || !data[def.key]) continue;
@@ -556,6 +558,17 @@ async function loadChart(period) {
         label: 'SMA 50',
         data: data.sma50,
         borderColor: '#8b5cf6',
+        borderWidth: SMA_LINE_WIDTH,
+        pointRadius: 0,
+        fill: false,
+        tension: 0.2,
+      });
+    }
+    if (smaActive[200] && data.sma200) {
+      datasets.push({
+        label: 'SMA 200',
+        data: data.sma200,
+        borderColor: '#06b6d4',
         borderWidth: SMA_LINE_WIDTH,
         pointRadius: 0,
         fill: false,

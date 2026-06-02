@@ -46,8 +46,12 @@
 <div class="section-row">
   <div style="flex:0 0 280px">
     <div class="card">
-      <div class="card-header">
-        <h2 class="card-title">Allocation</h2>
+      <div class="alloc-tabs">
+        <button class="alloc-tab active" id="tabTicker" onclick="switchAllocTab('ticker')">By Ticker</button>
+        <button class="alloc-tab" id="tabSector" onclick="switchAllocTab('sector')">By Sector</button>
+      </div>
+      <div class="card-header" style="padding-top:10px">
+        <h2 class="card-title" id="allocTitle">Allocation</h2>
       </div>
       <div class="chart-container-sm">
         <canvas id="allocationChart"></canvas>
@@ -159,10 +163,13 @@
 <script>
 let allocationChart = null;
 let portfolioData = [];
+let sectorData = [];
+let activeAllocTab = 'ticker';
 
 async function loadPortfolio() {
   const data = await fetch('/api/portfolio/data').then(r => r.json());
   portfolioData = data.positions || [];
+  sectorData = data.sector_breakdown || [];
   renderStats(data);
   applyPortfolioView();
 }
@@ -293,7 +300,70 @@ function applyPortfolioView() {
   });
 
   renderTable(rows);
-  renderAllocation(rows);
+  if (activeAllocTab === 'sector') {
+    renderSectorAllocation();
+  } else {
+    renderAllocation(rows);
+  }
+}
+
+function switchAllocTab(tab) {
+  activeAllocTab = tab;
+  document.getElementById('tabTicker').classList.toggle('active', tab === 'ticker');
+  document.getElementById('tabSector').classList.toggle('active', tab === 'sector');
+  if (tab === 'sector') {
+    document.getElementById('allocTitle').textContent = 'Sector Allocation';
+    renderSectorAllocation();
+  } else {
+    document.getElementById('allocTitle').textContent = 'Allocation';
+    const query = (document.getElementById('portfolioSearch')?.value || '').trim().toLowerCase();
+    let rows = [...portfolioData];
+    if (query) rows = rows.filter(p =>
+      p.ticker.toLowerCase().includes(query) ||
+      (p.name || '').toLowerCase().includes(query)
+    );
+    renderAllocation(rows);
+  }
+}
+
+function renderSectorAllocation() {
+  const legend = document.getElementById('allocationLegend');
+  if (!sectorData.length) {
+    legend.innerHTML = '<p class="empty" style="padding:1rem">No sector data</p>';
+    return;
+  }
+  const total = sectorData.reduce((s, d) => s + d.value, 0);
+  const colors = ['#6366f1','#06b6d4','#10b981','#f59e0b','#ef4444',
+                  '#8b5cf6','#ec4899','#14b8a6','#f97316','#84cc16'];
+  const labels = sectorData.map(d => d.sector);
+  const values = sectorData.map(d => d.value);
+
+  if (allocationChart) allocationChart.destroy();
+  allocationChart = new Chart(document.getElementById('allocationChart'), {
+    type: 'doughnut',
+    data: {
+      labels,
+      datasets: [{ data: values, backgroundColor: colors.slice(0, sectorData.length),
+                   borderWidth: 2, borderColor: '#151521' }],
+    },
+    options: {
+      cutout: '70%',
+      plugins: { legend: { display: false }, tooltip: {
+        callbacks: {
+          label: ctx => ` ${ctx.label}: $${fmtNum(ctx.raw)} (${(ctx.raw/total*100).toFixed(1)}%)`
+        }
+      }},
+      animation: { duration: 600 },
+    }
+  });
+
+  legend.innerHTML = sectorData.map((d, i) => `
+    <div class="legend-row">
+      <span class="legend-dot" style="background:${colors[i % colors.length]}"></span>
+      <span class="legend-label">${d.sector}</span>
+      <span class="legend-val">${(d.value / total * 100).toFixed(1)}%</span>
+    </div>
+  `).join('');
 }
 
 function renderRowsInChunks(chunks, body, renderFn, index = 0) {
