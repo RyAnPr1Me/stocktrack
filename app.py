@@ -1,0 +1,1713 @@
+import os
+import re
+import threading
+from collections import OrderedDict, defaultdict, deque
+from datetime import datetime, timedelta, timezone
+from functools import wraps
+
+import numpy as np
+import pandas as pd
+import requests
+import yfinance as yf
+from flask import (Flask, abort, flash, jsonify, redirect,
+                   render_template, request, url_for)
+from flask_login import (LoginManager, UserMixin, current_user,
+                         login_required, login_user, logout_user)
+from flask_sqlalchemy import SQLAlchemy
+from werkzeug.security import check_password_hash, generate_password_hash
+
+# ── App ────────────────────────────────────────────────────────────────────────
+app = Flask(__name__)
+_secret_key = os.environ.get('SECRET_KEY', '')
+_debug_mode = os.environ.get('FLASK_DEBUG', '0') == '1'
+if not _secret_key:
+    if _debug_mode:
+        _secret_key = 'dev-secret-do-not-use-in-production'
+    else:
+        raise RuntimeError('SECRET_KEY environment variable must be set in production. '
+                           'Set FLASK_DEBUG=1 to run in development mode.')
+app.config['SECRET_KEY'] = _secret_key
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///stocktrack.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
+login_manager = LoginManager(app)
+login_manager.login_view = 'login'
+login_manager.login_message = 'Please sign in to continue.'
+login_manager.login_message_category = 'warning'
+
+# ── In-memory cache ───────────────────────────────────────────────────────────
+_cache: OrderedDict[str, dict] = OrderedDict()
+_lock = threading.Lock()
+CACHE_MAX_ITEMS = 1500
+CACHE_TRIM_TO = 1200
+_rate_limit_bucket: dict[str, deque] = defaultdict(deque)
+
+TTL_QUOTE_FAST = 45
+TTL_QUOTE_MEDIUM = 180
+TTL_QUOTE_SLOW = 600
+
+TICKER_PATTERN = re.compile(r'^[A-Z0-9.\-^]{1,12}$')
+MINIMUM_SHARE_THRESHOLD = 1e-4
+
+
+def _utc_now():
+    return datetime.now(timezone.utc)
+
+
+def cache_get(key: str, ttl: int = 60):
+    with _lock:
+        entry = _cache.get(key)
+        if entry:
+            age = (_utc_now() - entry['ts']).total_seconds()
+            if age < ttl:
+                _cache.move_to_end(key)
+                return entry['data']
+            _cache.pop(key, None)
+    return None
+
+
+def cache_set(key: str, data):
+    with _lock:
+        _cache[key] = {'data': data, 'ts': _utc_now()}
+        _cache.move_to_end(key)
+        if len(_cache) > CACHE_MAX_ITEMS:
+            while len(_cache) > CACHE_TRIM_TO:
+                _cache.popitem(last=False)
+
+
+def _normalize_ticker(ticker: str) -> str | None:
+    ticker = (ticker or '').upper().strip()
+    if not ticker or not TICKER_PATTERN.match(ticker):
+        return None
+    return ticker
+
+
+def _rate_limit_key(scope: str) -> str:
+    uid = current_user.get_id() if current_user.is_authenticated else 'anon'
+    ip = request.remote_addr or '0.0.0.0'
+    return f'{scope}:{uid}:{ip}'
+
+
+def rate_limit(scope: str, limit: int = 60, window_seconds: int = 60):
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            now = _utc_now().timestamp()
+            key = _rate_limit_key(scope)
+            with _lock:
+                bucket = _rate_limit_bucket[key]
+                while bucket and now - bucket[0] > window_seconds:
+                    bucket.popleft()
+                if len(bucket) >= limit:
+                    retry_after = max(1, int(window_seconds - (now - bucket[0])))
+                    return jsonify({
+                        'error': 'Rate limit exceeded',
+                        'retry_after_seconds': retry_after,
+                    }), 429
+                bucket.append(now)
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+# ── Models ─────────────────────────────────────────────────────────────────────
+class User(UserMixin, db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password_hash = db.Column(db.String(255), nullable=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    positions = db.relationship('Position', backref='user', lazy=True,
+                                cascade='all, delete-orphan')
+    watchlist = db.relationship('WatchlistItem', backref='user', lazy=True,
+                                cascade='all, delete-orphan')
+
+    def set_password(self, pw: str):
+        self.password_hash = generate_password_hash(pw)
+
+    def check_password(self, pw: str) -> bool:
+        return check_password_hash(self.password_hash, pw)
+
+
+class Position(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    ticker = db.Column(db.String(10), nullable=False)
+    shares = db.Column(db.Float, nullable=False)
+    avg_cost = db.Column(db.Float, nullable=False)
+    added_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    notes = db.Column(db.String(500))
+    __table_args__ = (db.Index('ix_position_user_ticker', 'user_id', 'ticker'),)
+
+
+class WatchlistItem(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    ticker = db.Column(db.String(10), nullable=False)
+    added_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'ticker'),
+        db.Index('ix_watchlist_user_ticker', 'user_id', 'ticker'),
+    )
+
+
+class Trade(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    ticker = db.Column(db.String(10), nullable=False)
+    side = db.Column(db.String(4), nullable=False)  # BUY / SELL
+    shares = db.Column(db.Float, nullable=False)
+    price = db.Column(db.Float, nullable=False)
+    realized_pnl = db.Column(db.Float, nullable=False, default=0.0)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (
+        db.Index('ix_trade_user_created', 'user_id', 'created_at'),
+        db.Index('ix_trade_user_ticker', 'user_id', 'ticker'),
+    )
+
+
+class PriceAlert(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    ticker = db.Column(db.String(10), nullable=False)
+    target_price = db.Column(db.Float, nullable=False)
+    direction = db.Column(db.String(5), nullable=False)  # above / below
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    triggered_at = db.Column(db.DateTime)
+    last_trigger_price = db.Column(db.Float)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (
+        db.Index('ix_alert_user_active', 'user_id', 'is_active'),
+        db.Index('ix_alert_user_ticker', 'user_id', 'ticker'),
+    )
+
+
+@login_manager.user_loader
+def load_user(uid):
+    return db.session.get(User, int(uid))
+
+
+# ── Market constants ───────────────────────────────────────────────────────────
+INDEX_TICKERS = {
+    '^GSPC': 'S&P 500',
+    '^IXIC': 'NASDAQ',
+    '^DJI': 'DOW',
+    '^RUT': 'Russell 2K',
+    '^VIX': 'VIX',
+}
+
+SECTOR_ETFS = {
+    'XLK': 'Technology',
+    'XLF': 'Financials',
+    'XLV': 'Healthcare',
+    'XLE': 'Energy',
+    'XLY': 'Cons. Disc.',
+    'XLP': 'Cons. Staples',
+    'XLI': 'Industrials',
+    'XLB': 'Materials',
+    'XLU': 'Utilities',
+    'XLRE': 'Real Estate',
+    'XLC': 'Comm. Svcs',
+}
+
+POPULAR_TICKERS = [
+    'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK-B',
+    'JPM', 'V', 'UNH', 'JNJ', 'WMT', 'PG', 'MA', 'HD', 'DIS',
+    'INTC', 'AMD', 'CRM', 'NFLX', 'ADBE', 'ORCL', 'CSCO', 'PYPL',
+]
+YAHOO_SEARCH_URL = 'https://query1.finance.yahoo.com/v1/finance/search'
+
+
+# ── yFinance helpers ───────────────────────────────────────────────────────────
+def _safe_float(val, fallback=None):
+    try:
+        return round(float(val), 4) if val is not None else fallback
+    except (TypeError, ValueError):
+        return fallback
+
+
+def get_quote(ticker: str, ttl: int = TTL_QUOTE_FAST) -> dict | None:
+    ticker = _normalize_ticker(ticker)
+    if not ticker:
+        return None
+    cached = cache_get(f'q:{ticker}', ttl)
+    if cached:
+        return cached
+    try:
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+        # Use history for reliable price data
+        hist = t.history(period='5d', interval='1d')
+        if hist.empty:
+            return None
+        price = float(hist['Close'].iloc[-1])
+        prev_close = float(hist['Close'].iloc[-2]) if len(hist) > 1 else price
+        change = price - prev_close
+        change_pct = (change / prev_close * 100) if prev_close else 0
+
+        data = {
+            'ticker': ticker,
+            'name': info.get('longName') or info.get('shortName') or ticker,
+            'price': round(price, 2),
+            'prev_close': round(prev_close, 2),
+            'change': round(change, 2),
+            'change_pct': round(change_pct, 2),
+            'volume': info.get('volume') or info.get('regularMarketVolume'),
+            'avg_volume': info.get('averageVolume') or info.get('averageDailyVolume10Day'),
+            'market_cap': info.get('marketCap'),
+            'pe_ratio': _safe_float(info.get('trailingPE') or info.get('forwardPE')),
+            'eps': _safe_float(info.get('trailingEps')),
+            'beta': _safe_float(info.get('beta')),
+            'week_52_high': _safe_float(info.get('fiftyTwoWeekHigh')),
+            'week_52_low': _safe_float(info.get('fiftyTwoWeekLow')),
+            'day_high': _safe_float(info.get('dayHigh') or float(hist['High'].iloc[-1])),
+            'day_low': _safe_float(info.get('dayLow') or float(hist['Low'].iloc[-1])),
+            'open_price': _safe_float(info.get('open') or float(hist['Open'].iloc[-1])),
+            'dividend_yield': _safe_float(info.get('dividendYield')),
+            'forward_pe': _safe_float(info.get('forwardPE')),
+            'price_to_book': _safe_float(info.get('priceToBook')),
+            'sector': info.get('sector', ''),
+            'industry': info.get('industry', ''),
+            'description': info.get('longBusinessSummary', ''),
+            'website': info.get('website', ''),
+            'employees': info.get('fullTimeEmployees'),
+            'currency': info.get('currency', 'USD'),
+            'exchange': info.get('exchange', ''),
+            'analyst_rating': _safe_float(info.get('recommendationMean')),
+            'analyst_key': info.get('recommendationKey', ''),
+            'target_price': _safe_float(info.get('targetMeanPrice')),
+            'revenue': info.get('totalRevenue'),
+            'profit_margin': _safe_float(info.get('profitMargins')),
+            'roe': _safe_float(info.get('returnOnEquity')),
+            'roa': _safe_float(info.get('returnOnAssets')),
+            'debt_to_equity': _safe_float(info.get('debtToEquity')),
+            'current_ratio': _safe_float(info.get('currentRatio')),
+            'free_cash_flow': info.get('freeCashflow'),
+            'gross_margins': _safe_float(info.get('grossMargins')),
+            'operating_margins': _safe_float(info.get('operatingMargins')),
+            'revenue_growth': _safe_float(info.get('revenueGrowth')),
+            'earnings_growth': _safe_float(info.get('earningsGrowth')),
+            'shares_outstanding': info.get('sharesOutstanding'),
+            'float_shares': info.get('floatShares'),
+            'short_ratio': _safe_float(info.get('shortRatio')),
+            'peg_ratio': _safe_float(info.get('pegRatio')),
+            'country': info.get('country', ''),
+            'city': info.get('city', ''),
+        }
+        cache_set(f'q:{ticker}', data)
+        return data
+    except Exception as exc:
+        print(f'[get_quote] {ticker}: {exc}')
+        return None
+
+
+def get_quotes_map(tickers: list[str], ttl: int = TTL_QUOTE_FAST) -> dict[str, dict]:
+    result: dict[str, dict] = {}
+    seen = set()
+    normalized = []
+    for ticker in tickers:
+        t = _normalize_ticker(ticker)
+        if t and t not in seen:
+            seen.add(t)
+            normalized.append(t)
+
+    for t in normalized:
+        cached = cache_get(f'q:{t}', ttl)
+        if cached:
+            result[t] = cached
+    missing = [t for t in normalized if t not in result]
+    for t in missing:
+        q = get_quote(t, ttl=ttl)
+        if q:
+            result[t] = q
+    return result
+
+
+def get_symbol_suggestions(query: str, limit: int = 20) -> list[dict]:
+    q = (query or '').strip()
+    if not q:
+        return []
+    cache_key = f'suggest:{q.upper()}'
+    cached = cache_get(cache_key, ttl=TTL_QUOTE_MEDIUM)
+    if cached is not None:
+        return cached
+
+    try:
+        resp = requests.get(
+            YAHOO_SEARCH_URL,
+            params={'q': q, 'quotesCount': min(50, max(10, limit * 3)), 'newsCount': 0},
+            headers={'User-Agent': 'stocktrack/1.0'},
+            timeout=4,
+        )
+        resp.raise_for_status()
+        payload = resp.json() or {}
+    except Exception as exc:
+        print(f'[get_symbol_suggestions] {q}: {exc}')
+        return []
+
+    out = []
+    seen = set()
+    allowed_types = {'EQUITY', 'ETF', 'MUTUALFUND'}
+    for item in payload.get('quotes') or []:
+        ticker = _normalize_ticker(item.get('symbol') or '')
+        if not ticker or ticker in seen:
+            continue
+        quote_type = (item.get('quoteType') or '').upper()
+        if quote_type and quote_type not in allowed_types:
+            continue
+        seen.add(ticker)
+        out.append({
+            'ticker': ticker,
+            'name': (item.get('shortname') or item.get('longname') or ticker).strip(),
+            'exchange': item.get('exchange') or item.get('exchDisp') or '',
+        })
+        if len(out) >= limit:
+            break
+
+    cache_set(cache_key, out)
+    return out
+
+
+def _sma_array(values: list, period: int) -> list:
+    """Return SMA array aligned with values; None for positions lacking history."""
+    out = []
+    for i, _ in enumerate(values):
+        if i + 1 < period:
+            out.append(None)
+        else:
+            out.append(round(sum(values[i + 1 - period:i + 1]) / period, 2))
+    return out
+
+
+def get_chart_data(ticker: str, period: str = '1mo') -> dict | None:
+    period_to_interval = {
+        '1d': '5m', '5d': '15m', '1mo': '1d', '3mo': '1d',
+        '6mo': '1d', '1y': '1wk', '2y': '1wk', '5y': '1mo', 'max': '1mo',
+    }
+    interval = period_to_interval.get(period, '1d')
+    ticker = _normalize_ticker(ticker)
+    if not ticker:
+        return None
+    key = f'chart:{ticker}:{period}'
+    cached = cache_get(key, TTL_QUOTE_MEDIUM)
+    if cached:
+        return cached
+    try:
+        hist = yf.Ticker(ticker).history(period=period, interval=interval)
+        if hist.empty:
+            return None
+        hist.index = pd.to_datetime(hist.index)
+        closes = [round(float(v), 2) for v in hist['Close']]
+        data = {
+            'labels': [str(d)[:16] for d in hist.index],
+            'open':   [round(float(v), 2) for v in hist['Open']],
+            'high':   [round(float(v), 2) for v in hist['High']],
+            'low':    [round(float(v), 2) for v in hist['Low']],
+            'close':  closes,
+            'volume': [int(v) for v in hist['Volume']],
+            'sma20':  _sma_array(closes, 20),
+            'sma50':  _sma_array(closes, 50),
+            'sma200': _sma_array(closes, 200),
+        }
+        cache_set(key, data)
+        return data
+    except Exception as exc:
+        print(f'[get_chart_data] {ticker}: {exc}')
+        return None
+
+
+def get_news(ticker: str) -> list:
+    ticker = _normalize_ticker(ticker)
+    if not ticker:
+        return []
+    cached = cache_get(f'news:{ticker}', TTL_QUOTE_SLOW)
+    if cached is not None:
+        return cached
+    try:
+        raw = yf.Ticker(ticker).news or []
+        result = []
+        for item in raw[:12]:
+            content = item.get('content', {})
+            if isinstance(content, dict):
+                title = content.get('title', '')
+                url_obj = content.get('canonicalUrl', {})
+                link = url_obj.get('url', '') if isinstance(url_obj, dict) else ''
+                pub = (content.get('provider', {}) or {}).get('displayName', '')
+                pub_time = content.get('pubDate', '')
+            else:
+                title = item.get('title', '')
+                link = item.get('link', '')
+                pub = item.get('publisher', '')
+                pub_time = str(item.get('providerPublishTime', ''))
+            if title:
+                result.append({'title': title, 'url': link,
+                                'publisher': pub, 'published': pub_time})
+        cache_set(f'news:{ticker}', result)
+        return result
+    except Exception as exc:
+        print(f'[get_news] {ticker}: {exc}')
+        return []
+
+
+def get_financials(ticker: str) -> dict:
+    """Return quarterly revenue and net income (in billions) for the past 8 quarters."""
+    ticker = _normalize_ticker(ticker)
+    if not ticker:
+        return {'labels': [], 'revenue': [], 'net_income': []}
+    cached = cache_get(f'fin:{ticker}', TTL_QUOTE_SLOW)
+    if cached is not None:
+        return cached
+    empty: dict = {'labels': [], 'revenue': [], 'net_income': []}
+    try:
+        t = yf.Ticker(ticker)
+        q_fin = t.quarterly_income_stmt
+        if q_fin is None or q_fin.empty:
+            cache_set(f'fin:{ticker}', empty)
+            return empty
+        labels, revenue, net_income = [], [], []
+        cols = list(q_fin.columns[:8])
+        for col in reversed(cols):
+            try:
+                dt = pd.to_datetime(col)
+                labels.append(dt.strftime('%b %Y'))
+            except Exception:
+                labels.append(str(col)[:10])
+            rev_val = None
+            for row_name in ('Total Revenue', 'Revenue', 'Net Revenue'):
+                if row_name in q_fin.index:
+                    v = q_fin.loc[row_name, col]
+                    if v is not None and not (isinstance(v, float) and pd.isna(v)):
+                        rev_val = round(float(v) / 1e9, 3)
+                    break
+            net_val = None
+            for row_name in ('Net Income', 'Net Income Common Stockholders'):
+                if row_name in q_fin.index:
+                    v = q_fin.loc[row_name, col]
+                    if v is not None and not (isinstance(v, float) and pd.isna(v)):
+                        net_val = round(float(v) / 1e9, 3)
+                    break
+            revenue.append(rev_val)
+            net_income.append(net_val)
+        result = {'labels': labels, 'revenue': revenue, 'net_income': net_income}
+        cache_set(f'fin:{ticker}', result)
+        return result
+    except Exception as exc:
+        print(f'[get_financials] {ticker}: {exc}')
+        return empty
+
+
+def get_holders(ticker: str) -> list:
+    """Return top institutional holders for the ticker."""
+    ticker = _normalize_ticker(ticker)
+    if not ticker:
+        return []
+    cached = cache_get(f'hold:{ticker}', TTL_QUOTE_SLOW)
+    if cached is not None:
+        return cached
+    try:
+        t = yf.Ticker(ticker)
+        df = t.institutional_holders
+        if df is None or df.empty:
+            cache_set(f'hold:{ticker}', [])
+            return []
+        result = []
+        for _, row in df.head(10).iterrows():
+            holder = str(row.get('Holder', ''))
+            shares_raw = row.get('Shares')
+            shares = int(shares_raw) if shares_raw is not None and not (isinstance(shares_raw, float) and pd.isna(shares_raw)) else 0
+            val_raw = row.get('Value')
+            val = float(val_raw) if val_raw is not None and not (isinstance(val_raw, float) and pd.isna(val_raw)) else None
+            pct_raw = row.get('% Out')
+            pct = float(pct_raw) if pct_raw is not None and not (isinstance(pct_raw, float) and pd.isna(pct_raw)) else None
+            if pct is not None and pct < 1.0:
+                pct = round(pct * 100, 2)
+            else:
+                pct = round(pct, 2) if pct is not None else None
+            result.append({'holder': holder, 'shares': shares, 'value': val, 'pct_held': pct})
+        cache_set(f'hold:{ticker}', result)
+        return result
+    except Exception as exc:
+        print(f'[get_holders] {ticker}: {exc}')
+        return []
+
+
+def get_indices() -> list:
+    cached = cache_get('indices', TTL_QUOTE_FAST)
+    if cached:
+        return cached
+    result = []
+    quotes = get_quotes_map(list(INDEX_TICKERS.keys()), ttl=TTL_QUOTE_FAST)
+    for ticker, name in INDEX_TICKERS.items():
+        q = quotes.get(ticker)
+        if q:
+            result.append({'ticker': ticker, 'name': name,
+                           'price': q['price'], 'change': q['change'],
+                           'change_pct': q['change_pct']})
+    cache_set('indices', result)
+    return result
+
+
+def get_sector_performance() -> list:
+    cached = cache_get('sectors', TTL_QUOTE_MEDIUM)
+    if cached:
+        return cached
+    result = []
+    quotes = get_quotes_map(list(SECTOR_ETFS.keys()), ttl=TTL_QUOTE_MEDIUM)
+    for ticker, name in SECTOR_ETFS.items():
+        q = quotes.get(ticker)
+        if q:
+            result.append({'ticker': ticker, 'name': name,
+                           'change_pct': q['change_pct'], 'price': q['price'],
+                           'change': q['change']})
+    result.sort(key=lambda x: x['change_pct'], reverse=True)
+    cache_set('sectors', result)
+    return result
+
+
+def get_movers_data() -> dict:
+    cached = cache_get('movers', TTL_QUOTE_MEDIUM)
+    if cached:
+        return cached
+    quotes = []
+    quote_map = get_quotes_map(POPULAR_TICKERS, ttl=TTL_QUOTE_FAST)
+    for ticker in POPULAR_TICKERS:
+        q = quote_map.get(ticker)
+        if q:
+            quotes.append({'ticker': q['ticker'], 'name': q['name'],
+                           'price': q['price'], 'change': q['change'],
+                           'change_pct': q['change_pct'],
+                           'volume': q.get('volume', 0)})
+    gainers = sorted(quotes, key=lambda x: x['change_pct'], reverse=True)[:6]
+    losers = sorted(quotes, key=lambda x: x['change_pct'])[:6]
+    data = {'gainers': gainers, 'losers': losers}
+    cache_set('movers', data)
+    return data
+
+
+def evaluate_price_alerts(user_id: int, quote_map: dict[str, dict] | None = None) -> list[dict]:
+    alerts = PriceAlert.query.filter_by(user_id=user_id, is_active=True).all()
+    if not alerts:
+        return []
+    tickers = [a.ticker for a in alerts]
+    local_quote_map = quote_map or {}
+    missing_tickers = [t for t in tickers if t not in local_quote_map]
+    if missing_tickers:
+        local_quote_map.update(get_quotes_map(missing_tickers, ttl=TTL_QUOTE_FAST))
+    triggered = []
+    changed = False
+    for alert in alerts:
+        q = local_quote_map.get(alert.ticker)
+        if not q:
+            continue
+        price = q['price']
+        hit = (alert.direction == 'above' and price >= alert.target_price) or (
+            alert.direction == 'below' and price <= alert.target_price
+        )
+        if hit:
+            alert.is_active = False
+            alert.triggered_at = _utc_now()
+            alert.last_trigger_price = price
+            changed = True
+            triggered.append({
+                'id': alert.id,
+                'ticker': alert.ticker,
+                'target_price': round(alert.target_price, 2),
+                'direction': alert.direction,
+                'trigger_price': round(price, 2),
+                'triggered_at': alert.triggered_at.strftime('%Y-%m-%d %H:%M:%S'),
+            })
+    if changed:
+        db.session.commit()
+    return triggered
+
+
+# ── Technical Analysis & Price Prediction ─────────────────────────────────────
+# Small epsilon added to close prices before log() to prevent log(0) on zero
+# or near-zero prices that occasionally appear in yfinance data.
+_LOG_EPSILON = 1e-9
+# Fraction of daily volatility used to tilt the projection toward the
+# signal-weighted direction (0 = no tilt, 1 = full-vol tilt per √day).
+_BIAS_SCALING_FACTOR = 0.5
+def _ema_series(arr: np.ndarray, span: int) -> np.ndarray:
+    """Compute EMA over a 1-D array using the standard smoothing factor."""
+    k = 2.0 / (span + 1)
+    out = np.empty(len(arr))
+    out[0] = arr[0]
+    for i in range(1, len(arr)):
+        out[i] = arr[i] * k + out[i - 1] * (1 - k)
+    return out
+
+
+def compute_technical_signals(closes: np.ndarray, volumes: np.ndarray) -> dict:
+    """
+    Compute a composite technical-analysis signal score (-100 to +100)
+    and forward price projections for 7 / 14 / 30 trading days.
+
+    Indicators used:
+      SMA 20 / 50 cross · RSI(14) · MACD(12,26,9) · Bollinger Bands(20,2σ)
+      Rate-of-change (5 / 20 day) · Volume ratio · Linear-regression slope
+    """
+    n = len(closes)
+    price = float(closes[-1])
+    signals: dict = {'price': price}
+    score = 0
+
+    # ── Moving Averages ────────────────────────────────────────────────────────
+    def sma(window: int):
+        return float(np.mean(closes[-window:])) if n >= window else None
+
+    sma20 = sma(20)
+    sma50 = sma(50)
+
+    if sma20 is not None:
+        signals['sma20'] = round(sma20, 2)
+        if price > sma20:
+            score += 10
+            signals['sma20_signal'] = 'bullish'
+        else:
+            score -= 10
+            signals['sma20_signal'] = 'bearish'
+
+    if sma20 is not None and sma50 is not None:
+        signals['sma50'] = round(sma50, 2)
+        if sma20 > sma50:
+            score += 15
+            signals['ma_cross_signal'] = 'golden'
+        else:
+            score -= 15
+            signals['ma_cross_signal'] = 'death'
+
+    # ── RSI (14) ───────────────────────────────────────────────────────────────
+    if n >= 15:
+        deltas = np.diff(closes[-15:].astype(float))
+        gains = float(deltas[deltas > 0].sum()) / 14
+        losses = float(-deltas[deltas < 0].sum()) / 14
+        rsi = 100.0 if losses == 0 else 100.0 - (100.0 / (1.0 + gains / losses))
+        signals['rsi'] = round(rsi, 1)
+        if rsi < 30:
+            score += 20
+            signals['rsi_signal'] = 'oversold'
+        elif rsi > 70:
+            score -= 20
+            signals['rsi_signal'] = 'overbought'
+        elif rsi >= 50:
+            score += 5
+            signals['rsi_signal'] = 'bullish'
+        else:
+            score -= 5
+            signals['rsi_signal'] = 'bearish'
+
+    # ── MACD (12 / 26 / 9) ────────────────────────────────────────────────────
+    if n >= 35:
+        ema12 = _ema_series(closes.astype(float), 12)
+        ema26 = _ema_series(closes.astype(float), 26)
+        macd_line = ema12 - ema26
+        signal_line = _ema_series(macd_line, 9)
+        macd_val = float(macd_line[-1])
+        signal_val = float(signal_line[-1])
+        signals['macd'] = round(macd_val, 4)
+        signals['macd_signal_line'] = round(signal_val, 4)
+        if macd_val > signal_val:
+            score += 15
+            signals['macd_cross'] = 'bullish'
+        else:
+            score -= 15
+            signals['macd_cross'] = 'bearish'
+
+    # ── Bollinger Bands (20, ±2σ) ─────────────────────────────────────────────
+    if n >= 20:
+        bb = closes[-20:].astype(float)
+        bb_mean = float(np.mean(bb))
+        bb_std = float(np.std(bb))
+        upper_bb = bb_mean + 2 * bb_std
+        lower_bb = bb_mean - 2 * bb_std
+        bb_pct = (price - lower_bb) / (upper_bb - lower_bb) if upper_bb != lower_bb else 0.5
+        signals['bb_pct'] = round(bb_pct, 2)
+        signals['bb_upper'] = round(upper_bb, 2)
+        signals['bb_lower'] = round(lower_bb, 2)
+        if bb_pct < 0.2:
+            score += 15
+            signals['bb_signal'] = 'oversold'
+        elif bb_pct > 0.8:
+            score -= 15
+            signals['bb_signal'] = 'overbought'
+        else:
+            signals['bb_signal'] = 'neutral'
+
+    # ── Rate of Change (5 / 20 day) ────────────────────────────────────────────
+    if n >= 21:
+        c5 = float(closes[-6]) if closes[-6] != 0 else None
+        c20 = float(closes[-21]) if closes[-21] != 0 else None
+        if c5:
+            roc5 = (price / c5 - 1.0) * 100.0
+            signals['roc5'] = round(roc5, 2)
+            score += 8 if roc5 > 0 else -8
+        if c20:
+            roc20 = (price / c20 - 1.0) * 100.0
+            signals['roc20'] = round(roc20, 2)
+            score += 12 if roc20 > 0 else -12
+
+    # ── Volume trend ──────────────────────────────────────────────────────────
+    if len(volumes) >= 20:
+        vol_recent = float(np.mean(volumes[-5:]))
+        vol_avg = float(np.mean(volumes[-20:]))
+        if vol_avg > 0:
+            vol_ratio = vol_recent / vol_avg
+            signals['volume_ratio'] = round(vol_ratio, 2)
+            roc5_v = signals.get('roc5', 0)
+            if vol_ratio > 1.2:
+                score += 8 if roc5_v > 0 else -8
+
+    # ── Linear Regression slope (30-day) ──────────────────────────────────────
+    lookback = min(30, n)
+    if lookback >= 5:
+        x = np.arange(lookback, dtype=float)
+        y = closes[-lookback:].astype(float)
+        x_m = float(np.mean(x))
+        y_m = float(np.mean(y))
+        denom = float(np.sum((x - x_m) ** 2))
+        if denom != 0:
+            lr_slope = float(np.sum((x - x_m) * (y - y_m)) / denom)
+            lr_slope_pct = lr_slope / price * 100.0 if price else 0.0
+            signals['lr_slope_pct'] = round(lr_slope_pct, 3)
+            if lr_slope_pct > 0.1:
+                score += 10
+            elif lr_slope_pct < -0.1:
+                score -= 10
+
+    score = max(-100, min(100, score))
+    signals['composite_score'] = score
+
+    if score >= 35:
+        signals['trend'] = 'Bullish'
+        signals['trend_color'] = 'green'
+    elif score >= 10:
+        signals['trend'] = 'Mildly Bullish'
+        signals['trend_color'] = 'green'
+    elif score >= -10:
+        signals['trend'] = 'Neutral'
+        signals['trend_color'] = 'yellow'
+    elif score >= -35:
+        signals['trend'] = 'Mildly Bearish'
+        signals['trend_color'] = 'red'
+    else:
+        signals['trend'] = 'Bearish'
+        signals['trend_color'] = 'red'
+
+    # ── Price Projections ─────────────────────────────────────────────────────
+    hist_len = min(180, n)
+    if hist_len >= 20:
+        log_ret = np.diff(np.log(closes[-hist_len:].astype(float) + _LOG_EPSILON))
+        daily_mu = float(np.mean(log_ret))
+        daily_vol = float(np.std(log_ret))
+        bias_scale = (score / 100.0) * daily_vol * _BIAS_SCALING_FACTOR
+        projections: dict = {}
+        for days in [7, 14, 30]:
+            exp_log_ret = daily_mu * days + bias_scale * float(np.sqrt(days))
+            proj_price = price * float(np.exp(exp_log_ret))
+            conf = daily_vol * float(np.sqrt(days))
+            proj_low = price * float(np.exp(exp_log_ret - conf))
+            proj_high = price * float(np.exp(exp_log_ret + conf))
+            projections[f'd{days}'] = {
+                'price': round(proj_price, 2),
+                'low': round(proj_low, 2),
+                'high': round(proj_high, 2),
+                'change_pct': round((proj_price / price - 1.0) * 100.0, 2),
+            }
+        signals['projections'] = projections
+        signals['daily_volatility_pct'] = round(daily_vol * 100.0, 2)
+        signals['annualized_volatility_pct'] = round(daily_vol * float(np.sqrt(252)) * 100.0, 1)
+
+    return signals
+
+
+def predict_price(ticker: str) -> dict | None:
+    """Fetch 6 months of history and return technical signals + price projections."""
+    ticker = _normalize_ticker(ticker)
+    if not ticker:
+        return None
+    cache_key = f'predict:{ticker}'
+    cached = cache_get(cache_key, TTL_QUOTE_MEDIUM)
+    if cached:
+        return cached
+    try:
+        hist = yf.Ticker(ticker).history(period='6mo', interval='1d')
+        if hist.empty or len(hist) < 20:
+            return None
+        closes = hist['Close'].values.astype(float)
+        volumes = hist['Volume'].values.astype(float)
+        result = compute_technical_signals(closes, volumes)
+        cache_set(cache_key, result)
+        return result
+    except Exception as exc:
+        print(f'[predict_price] {ticker}: {exc}')
+        return None
+
+
+def fmt_large(n) -> str:
+    if n is None:
+        return 'N/A'
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return 'N/A'
+    if abs(n) >= 1e12:
+        return f'${n/1e12:.2f}T'
+    if abs(n) >= 1e9:
+        return f'${n/1e9:.2f}B'
+    if abs(n) >= 1e6:
+        return f'${n/1e6:.2f}M'
+    return f'${n:,.2f}'
+
+
+app.jinja_env.globals['fmt_large'] = fmt_large
+
+
+# ── Auth routes ────────────────────────────────────────────────────────────────
+@app.route('/')
+def index():
+    if current_user.is_authenticated:
+        return redirect(url_for('dashboard'))
+    return render_template('landing.html')
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if current_user.is_authenticated:
+        return redirect(url_for('dashboard'))
+    if request.method == 'POST':
+        identifier = request.form.get('identifier', '').strip()
+        password = request.form.get('password', '')
+        remember = bool(request.form.get('remember'))
+        user = User.query.filter(
+            (User.username == identifier) | (User.email == identifier)
+        ).first()
+        if user and user.check_password(password):
+            login_user(user, remember=remember)
+            flash(f'Welcome back, {user.username}!', 'success')
+            return redirect(url_for('dashboard'))
+        flash('Invalid username or password.', 'error')
+    return render_template('login.html')
+
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if current_user.is_authenticated:
+        return redirect(url_for('dashboard'))
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        email = request.form.get('email', '').strip().lower()
+        password = request.form.get('password', '')
+        confirm = request.form.get('confirm_password', '')
+        errors = []
+        if len(username) < 3:
+            errors.append('Username must be at least 3 characters.')
+        if '@' not in email:
+            errors.append('Enter a valid email address.')
+        if len(password) < 8:
+            errors.append('Password must be at least 8 characters.')
+        if password != confirm:
+            errors.append('Passwords do not match.')
+        if not errors:
+            if User.query.filter_by(username=username).first():
+                errors.append('Username already taken.')
+            if User.query.filter_by(email=email).first():
+                errors.append('Email already registered.')
+        if errors:
+            for msg in errors:
+                flash(msg, 'error')
+        else:
+            user = User(username=username, email=email)
+            user.set_password(password)
+            db.session.add(user)
+            db.session.commit()
+            login_user(user)
+            flash('Account created! Welcome to StockTrack.', 'success')
+            return redirect(url_for('dashboard'))
+    return render_template('register.html')
+
+
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    flash('You have been signed out.', 'info')
+    return redirect(url_for('login'))
+
+
+# ── Page routes ────────────────────────────────────────────────────────────────
+@app.route('/dashboard')
+@login_required
+def dashboard():
+    return render_template('dashboard.html')
+
+
+@app.route('/portfolio')
+@login_required
+def portfolio():
+    return render_template('portfolio.html')
+
+
+@app.route('/portfolio/add', methods=['POST'])
+@login_required
+def add_position():
+    ticker = _normalize_ticker(request.form.get('ticker', ''))
+    try:
+        shares = float(request.form.get('shares', 0))
+        avg_cost = float(request.form.get('avg_cost', 0))
+        if shares <= 0 or avg_cost <= 0:
+            raise ValueError
+    except (ValueError, TypeError):
+        flash('Enter valid positive values for shares and cost.', 'error')
+        return redirect(url_for('portfolio'))
+    if not ticker:
+        flash('Enter a valid ticker symbol.', 'error')
+        return redirect(url_for('portfolio'))
+    q = get_quote(ticker)
+    if not q:
+        flash(f'Could not find ticker "{ticker}". Check the symbol and try again.', 'error')
+        return redirect(url_for('portfolio'))
+    notes = request.form.get('notes', '').strip()[:500]
+    existing = Position.query.filter_by(user_id=current_user.id, ticker=ticker).first()
+    if existing:
+        total_shares = existing.shares + shares
+        total_cost_basis = (existing.shares * existing.avg_cost) + (shares * avg_cost)
+        existing.shares = total_shares
+        existing.avg_cost = total_cost_basis / total_shares
+        if notes:
+            existing.notes = notes
+        flash(f'Updated position in {ticker} — averaged to ${existing.avg_cost:.2f}/share.', 'success')
+    else:
+        db.session.add(Position(user_id=current_user.id, ticker=ticker,
+                                shares=shares, avg_cost=avg_cost, notes=notes))
+        flash(f'Added {shares:g} shares of {ticker} at ${avg_cost:.2f}.', 'success')
+    db.session.add(Trade(user_id=current_user.id, ticker=ticker, side='BUY', shares=shares, price=avg_cost))
+    db.session.commit()
+    return redirect(url_for('portfolio'))
+
+
+@app.route('/portfolio/remove/<int:pos_id>', methods=['POST'])
+@login_required
+def remove_position(pos_id):
+    pos = Position.query.filter_by(id=pos_id, user_id=current_user.id).first_or_404()
+    ticker = pos.ticker
+    db.session.delete(pos)
+    db.session.commit()
+    flash(f'Removed {ticker} from portfolio.', 'info')
+    return redirect(url_for('portfolio'))
+
+
+@app.route('/portfolio/sell/<int:pos_id>', methods=['POST'])
+@login_required
+def sell_position(pos_id):
+    pos = Position.query.filter_by(id=pos_id, user_id=current_user.id).first_or_404()
+    try:
+        shares = float(request.form.get('shares', 0))
+        sell_price = float(request.form.get('price', 0))
+        if shares <= 0 or sell_price <= 0 or shares > pos.shares:
+            raise ValueError
+    except (TypeError, ValueError):
+        flash('Enter a valid share amount and sale price.', 'error')
+        return redirect(url_for('portfolio'))
+
+    realized = (sell_price - pos.avg_cost) * shares
+    pos.shares -= shares
+    if pos.shares <= MINIMUM_SHARE_THRESHOLD:
+        db.session.delete(pos)
+    db.session.add(Trade(
+        user_id=current_user.id,
+        ticker=pos.ticker,
+        side='SELL',
+        shares=shares,
+        price=sell_price,
+        realized_pnl=realized,
+    ))
+    db.session.commit()
+    flash(f'Recorded sale of {shares:g} shares of {pos.ticker} at ${sell_price:.2f}.', 'success')
+    return redirect(url_for('portfolio'))
+
+
+@app.route('/watchlist')
+@login_required
+def watchlist():
+    return render_template('watchlist.html')
+
+
+@app.route('/watchlist/add', methods=['POST'])
+@login_required
+def add_watchlist():
+    ticker = _normalize_ticker(request.form.get('ticker', ''))
+    if not ticker:
+        flash('Enter a valid ticker symbol.', 'error')
+        return redirect(url_for('watchlist'))
+    q = get_quote(ticker)
+    if not q:
+        flash(f'Could not find ticker "{ticker}".', 'error')
+        return redirect(url_for('watchlist'))
+    if WatchlistItem.query.filter_by(user_id=current_user.id, ticker=ticker).first():
+        flash(f'{ticker} is already on your watchlist.', 'info')
+    else:
+        db.session.add(WatchlistItem(user_id=current_user.id, ticker=ticker))
+        db.session.commit()
+        flash(f'Added {ticker} ({q["name"]}) to watchlist.', 'success')
+    return redirect(url_for('watchlist'))
+
+
+@app.route('/watchlist/remove-by-ticker/<ticker>', methods=['POST'])
+@login_required
+def remove_watchlist_by_ticker(ticker):
+    ticker = ticker.upper()
+    item = WatchlistItem.query.filter_by(user_id=current_user.id, ticker=ticker).first()
+    if item:
+        db.session.delete(item)
+        db.session.commit()
+        flash(f'Removed {ticker} from watchlist.', 'info')
+    return redirect(url_for('watchlist'))
+
+
+@app.route('/watchlist/remove/<int:item_id>', methods=['POST'])
+@login_required
+def remove_watchlist(item_id):
+    item = WatchlistItem.query.filter_by(id=item_id,
+                                         user_id=current_user.id).first_or_404()
+    ticker = item.ticker
+    db.session.delete(item)
+    db.session.commit()
+    flash(f'Removed {ticker} from watchlist.', 'info')
+    return redirect(url_for('watchlist'))
+
+
+@app.route('/alerts/add', methods=['POST'])
+@login_required
+def add_alert():
+    ticker = _normalize_ticker(request.form.get('ticker', ''))
+    direction = (request.form.get('direction', 'above') or '').lower()
+    try:
+        target_price = float(request.form.get('target_price', 0))
+        if target_price <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        flash('Enter a valid target price for alert.', 'error')
+        return redirect(url_for('watchlist'))
+    if direction not in ('above', 'below'):
+        flash('Alert direction must be above or below.', 'error')
+        return redirect(url_for('watchlist'))
+    if not ticker:
+        flash('Enter a valid ticker symbol.', 'error')
+        return redirect(url_for('watchlist'))
+
+    if not get_quote(ticker):
+        flash(f'Could not create alert for "{ticker}".', 'error')
+        return redirect(url_for('watchlist'))
+
+    duplicate = PriceAlert.query.filter_by(
+        user_id=current_user.id, ticker=ticker, target_price=target_price,
+        direction=direction, is_active=True
+    ).first()
+    if duplicate:
+        flash('An identical active alert already exists.', 'info')
+        return redirect(url_for('watchlist'))
+
+    db.session.add(PriceAlert(
+        user_id=current_user.id,
+        ticker=ticker,
+        target_price=target_price,
+        direction=direction,
+        is_active=True,
+    ))
+    db.session.commit()
+    flash(f'Alert set: {ticker} {direction} ${target_price:.2f}.', 'success')
+    return redirect(url_for('watchlist'))
+
+
+@app.route('/alerts/add-from-stock', methods=['POST'])
+@login_required
+def add_alert_from_stock():
+    """Set a price alert and redirect back to the stock detail page."""
+    ticker = _normalize_ticker(request.form.get('ticker', ''))
+    direction = (request.form.get('direction', 'above') or '').lower()
+    try:
+        target_price = float(request.form.get('target_price', 0))
+        if target_price <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        flash('Enter a valid target price for alert.', 'error')
+        return redirect(url_for('stock_detail', ticker=ticker or 'AAPL'))
+    if direction not in ('above', 'below'):
+        flash('Alert direction must be above or below.', 'error')
+        return redirect(url_for('stock_detail', ticker=ticker))
+    if not ticker:
+        flash('Enter a valid ticker symbol.', 'error')
+        return redirect(url_for('dashboard'))
+    if not get_quote(ticker):
+        flash(f'Could not create alert for "{ticker}".', 'error')
+        return redirect(url_for('stock_detail', ticker=ticker))
+    duplicate = PriceAlert.query.filter_by(
+        user_id=current_user.id, ticker=ticker, target_price=target_price,
+        direction=direction, is_active=True,
+    ).first()
+    if not duplicate:
+        db.session.add(PriceAlert(
+            user_id=current_user.id, ticker=ticker,
+            target_price=target_price, direction=direction, is_active=True,
+        ))
+        db.session.commit()
+        flash(f'Alert set: {ticker} {direction} ${target_price:.2f}.', 'success')
+    else:
+        flash('An identical active alert already exists.', 'info')
+    return redirect(url_for('stock_detail', ticker=ticker))
+
+
+@app.route('/alerts/remove/<int:alert_id>', methods=['POST'])
+@login_required
+def remove_alert(alert_id):
+    alert = PriceAlert.query.filter_by(id=alert_id, user_id=current_user.id).first_or_404()
+    ticker = alert.ticker
+    db.session.delete(alert)
+    db.session.commit()
+    flash(f'Removed alert for {ticker}.', 'info')
+    return redirect(url_for('watchlist'))
+
+
+@app.route('/stock/<ticker>')
+@login_required
+def stock_detail(ticker):
+    ticker = ticker.upper()
+    q = get_quote(ticker)
+    if not q:
+        flash(f'Unable to load data for "{ticker}". Verify the symbol is correct.', 'error')
+        return redirect(url_for('dashboard'))
+    in_watchlist = WatchlistItem.query.filter_by(
+        user_id=current_user.id, ticker=ticker).first() is not None
+    position = Position.query.filter_by(
+        user_id=current_user.id, ticker=ticker).first()
+    active_alerts = PriceAlert.query.filter_by(
+        user_id=current_user.id, ticker=ticker, is_active=True).all()
+    return render_template('stock.html', quote=q,
+                           in_watchlist=in_watchlist, position=position,
+                           active_alerts=active_alerts)
+
+
+@app.route('/market')
+@login_required
+def market():
+    return render_template('market.html')
+
+
+@app.route('/search')
+@login_required
+def search():
+    return render_template('search.html', query=request.args.get('q', ''))
+
+
+@app.route('/trades')
+@login_required
+def trades():
+    return render_template('trades.html')
+
+
+# ── API routes ─────────────────────────────────────────────────────────────────
+@app.route('/api/quote/<ticker>')
+@login_required
+@rate_limit('api_quote', limit=120, window_seconds=60)
+def api_quote(ticker):
+    safe_ticker = _normalize_ticker(ticker)
+    if not safe_ticker:
+        return jsonify({'error': 'Invalid ticker symbol'}), 400
+    data = get_quote(safe_ticker, ttl=TTL_QUOTE_FAST)
+    if not data:
+        return jsonify({'error': 'Ticker not found'}), 404
+    return jsonify(data)
+
+
+@app.route('/api/chart/<ticker>')
+@login_required
+@rate_limit('api_chart', limit=90, window_seconds=60)
+def api_chart(ticker):
+    period = request.args.get('period', '1mo')
+    if period not in ('1d', '5d', '1mo', '3mo', '6mo', '1y', '2y', '5y', 'max'):
+        period = '1mo'
+    safe_ticker = _normalize_ticker(ticker)
+    if not safe_ticker:
+        return jsonify({'error': 'Invalid ticker symbol'}), 400
+    data = get_chart_data(safe_ticker, period)
+    if not data:
+        return jsonify({'error': 'No chart data available'}), 404
+    return jsonify(data)
+
+
+@app.route('/api/news/<ticker>')
+@login_required
+def api_news(ticker):
+    safe_ticker = _normalize_ticker(ticker)
+    if not safe_ticker:
+        return jsonify({'error': 'Invalid ticker symbol'}), 400
+    return jsonify(get_news(safe_ticker))
+
+
+@app.route('/api/predict/<ticker>')
+@login_required
+@rate_limit('api_predict', limit=30, window_seconds=60)
+def api_predict(ticker):
+    safe_ticker = _normalize_ticker(ticker)
+    if not safe_ticker:
+        return jsonify({'error': 'Invalid ticker symbol'}), 400
+    data = predict_price(safe_ticker)
+    if not data:
+        return jsonify({'error': 'Insufficient historical data for this ticker'}), 404
+    return jsonify(data)
+
+
+@app.route('/api/financials/<ticker>')
+@login_required
+@rate_limit('api_financials', limit=30, window_seconds=60)
+def api_financials(ticker):
+    safe_ticker = _normalize_ticker(ticker)
+    if not safe_ticker:
+        return jsonify({'error': 'Invalid ticker symbol'}), 400
+    return jsonify(get_financials(safe_ticker))
+
+
+@app.route('/api/holders/<ticker>')
+@login_required
+@rate_limit('api_holders', limit=30, window_seconds=60)
+def api_holders(ticker):
+    safe_ticker = _normalize_ticker(ticker)
+    if not safe_ticker:
+        return jsonify({'error': 'Invalid ticker symbol'}), 400
+    return jsonify(get_holders(safe_ticker))
+
+
+@app.route('/api/portfolio/data')
+@login_required
+@rate_limit('api_portfolio', limit=60, window_seconds=60)
+def api_portfolio_data():
+    positions = Position.query.filter_by(user_id=current_user.id).all()
+    quote_map = get_quotes_map([pos.ticker for pos in positions], ttl=TTL_QUOTE_FAST)
+    rows = []
+    total_value = total_cost = 0.0
+    for pos in positions:
+        q = quote_map.get(pos.ticker)
+        if not q:
+            continue
+        mkt_val = pos.shares * q['price']
+        cost_basis = pos.shares * pos.avg_cost
+        gain = mkt_val - cost_basis
+        gain_pct = (gain / cost_basis * 100) if cost_basis else 0
+        day_gain = pos.shares * q['change']
+        total_value += mkt_val
+        total_cost += cost_basis
+        rows.append({
+            'id': pos.id,
+            'ticker': pos.ticker,
+            'name': q.get('name', pos.ticker),
+            'shares': pos.shares,
+            'avg_cost': round(pos.avg_cost, 2),
+            'current_price': q['price'],
+            'market_value': round(mkt_val, 2),
+            'cost_basis': round(cost_basis, 2),
+            'gain': round(gain, 2),
+            'gain_pct': round(gain_pct, 2),
+            'day_change': q['change'],
+            'day_change_pct': q['change_pct'],
+            'day_gain': round(day_gain, 2),
+            'sector': q.get('sector', ''),
+            'notes': pos.notes or '',
+            'added_at': pos.added_at.strftime('%Y-%m-%d'),
+        })
+    rows.sort(key=lambda r: r['market_value'], reverse=True)
+    for row in rows:
+        row['contribution_pct'] = round((row['market_value'] / total_value * 100), 2) if total_value else 0
+    total_gain = total_value - total_cost
+    total_gain_pct = (total_gain / total_cost * 100) if total_cost else 0
+    for row in rows:
+        row['gain_contribution_pct'] = round((row['gain'] / total_gain * 100), 2) if total_gain else 0
+    realized_gain = db.session.query(db.func.coalesce(db.func.sum(Trade.realized_pnl), 0.0)).filter_by(
+        user_id=current_user.id, side='SELL'
+    ).scalar() or 0.0
+    day_gain = sum(r['day_gain'] for r in rows)
+    prev_value = total_value - day_gain
+    day_pct = (day_gain / prev_value * 100) if prev_value else 0
+    sector_map: dict[str, float] = {}
+    for row in rows:
+        sector = row.get('sector') or 'Unknown'
+        sector_map[sector] = round(sector_map.get(sector, 0.0) + row['market_value'], 2)
+    sector_breakdown = sorted(
+        [{'sector': k, 'value': v} for k, v in sector_map.items()],
+        key=lambda x: x['value'], reverse=True,
+    )
+    return jsonify({
+        'positions': rows,
+        'total_value': round(total_value, 2),
+        'total_cost': round(total_cost, 2),
+        'total_gain': round(total_gain, 2),
+        'total_gain_pct': round(total_gain_pct, 2),
+        'analytics': {
+            'unrealized_gain': round(total_gain, 2),
+            'realized_gain': round(realized_gain, 2),
+            'total_return': round(total_gain + realized_gain, 2),
+            'day_gain': round(day_gain, 2),
+            'day_gain_pct': round(day_pct, 2),
+        },
+        'sector_breakdown': sector_breakdown,
+    })
+
+
+@app.route('/api/watchlist/data')
+@login_required
+@rate_limit('api_watchlist', limit=60, window_seconds=60)
+def api_watchlist_data():
+    items = WatchlistItem.query.filter_by(user_id=current_user.id).all()
+    alerts = PriceAlert.query.filter_by(user_id=current_user.id, is_active=True).all()
+    quote_map = get_quotes_map([item.ticker for item in items] + [a.ticker for a in alerts], ttl=TTL_QUOTE_FAST)
+    triggered_alerts = evaluate_price_alerts(current_user.id, quote_map=quote_map)
+    refreshed_alerts = PriceAlert.query.filter_by(user_id=current_user.id, is_active=True).all()
+    alert_by_ticker: dict[str, list[dict]] = defaultdict(list)
+    for a in refreshed_alerts:
+        alert_by_ticker[a.ticker].append({
+            'id': a.id,
+            'target_price': round(a.target_price, 2),
+            'direction': a.direction,
+        })
+    result = []
+    for item in items:
+        q = quote_map.get(item.ticker)
+        if q:
+            result.append({
+                'id': item.id,
+                'ticker': item.ticker,
+                'name': q.get('name', item.ticker),
+                'price': q['price'],
+                'change': q['change'],
+                'change_pct': q['change_pct'],
+                'volume': q.get('volume'),
+                'market_cap': q.get('market_cap'),
+                'week_52_high': q.get('week_52_high'),
+                'week_52_low': q.get('week_52_low'),
+                'pe_ratio': q.get('pe_ratio'),
+                'sector': q.get('sector', ''),
+                'added_at': item.added_at.strftime('%Y-%m-%d'),
+                'alerts': alert_by_ticker.get(item.ticker, []),
+            })
+    return jsonify({
+        'items': result,
+        'triggered_alerts': triggered_alerts,
+    })
+
+
+@app.route('/api/market/indices')
+@login_required
+def api_indices():
+    return jsonify(get_indices())
+
+
+@app.route('/api/market/sectors')
+@login_required
+def api_sectors():
+    return jsonify(get_sector_performance())
+
+
+@app.route('/api/market/movers')
+@login_required
+@rate_limit('api_movers', limit=60, window_seconds=60)
+def api_movers():
+    return jsonify(get_movers_data())
+
+
+@app.route('/api/dashboard/summary')
+@login_required
+def api_dashboard_summary():
+    indices = get_indices()
+    positions = Position.query.filter_by(user_id=current_user.id).all()
+    quote_map = get_quotes_map([pos.ticker for pos in positions], ttl=TTL_QUOTE_FAST)
+    portfolio_value = portfolio_day_gain = 0.0
+    for pos in positions:
+        q = quote_map.get(pos.ticker)
+        if q:
+            portfolio_value += pos.shares * q['price']
+            portfolio_day_gain += pos.shares * q['change']
+    prev_val = portfolio_value - portfolio_day_gain
+    day_pct = (portfolio_day_gain / prev_val * 100) if prev_val else 0
+    return jsonify({
+        'indices': indices,
+        'portfolio_value': round(portfolio_value, 2),
+        'portfolio_day_gain': round(portfolio_day_gain, 2),
+        'portfolio_day_gain_pct': round(day_pct, 2),
+        'position_count': len(positions),
+        'watchlist_count': WatchlistItem.query.filter_by(
+            user_id=current_user.id).count(),
+    })
+
+
+@app.route('/api/dashboard/data')
+@login_required
+@rate_limit('api_dashboard_data', limit=60, window_seconds=60)
+def api_dashboard_data():
+    indices = get_indices()
+    sectors = get_sector_performance()
+    movers = get_movers_data()
+
+    positions = Position.query.filter_by(user_id=current_user.id).all()
+    watchlist_items = WatchlistItem.query.filter_by(user_id=current_user.id).all()
+    active_alerts = PriceAlert.query.filter_by(user_id=current_user.id, is_active=True).all()
+    all_tickers = [p.ticker for p in positions] + [w.ticker for w in watchlist_items] + [a.ticker for a in active_alerts]
+    quote_map = get_quotes_map(all_tickers, ttl=TTL_QUOTE_FAST)
+
+    portfolio_rows = []
+    portfolio_value = portfolio_day_gain = total_cost = 0.0
+    for pos in positions:
+        q = quote_map.get(pos.ticker)
+        if not q:
+            continue
+        mkt_val = pos.shares * q['price']
+        cost_basis = pos.shares * pos.avg_cost
+        gain = mkt_val - cost_basis
+        gain_pct = (gain / cost_basis * 100) if cost_basis else 0
+        day_gain = pos.shares * q['change']
+        portfolio_value += mkt_val
+        portfolio_day_gain += day_gain
+        total_cost += cost_basis
+        portfolio_rows.append({
+            'id': pos.id,
+            'ticker': pos.ticker,
+            'name': q.get('name', pos.ticker),
+            'shares': pos.shares,
+            'avg_cost': round(pos.avg_cost, 2),
+            'market_value': round(mkt_val, 2),
+            'gain_pct': round(gain_pct, 2),
+            'day_gain': round(day_gain, 2),
+        })
+    portfolio_rows.sort(key=lambda r: r['market_value'], reverse=True)
+
+    watchlist_rows = []
+    for item in watchlist_items:
+        q = quote_map.get(item.ticker)
+        if q:
+            watchlist_rows.append({
+                'id': item.id,
+                'ticker': item.ticker,
+                'name': q.get('name', item.ticker),
+                'price': q['price'],
+                'change_pct': q['change_pct'],
+            })
+
+    prev_val = portfolio_value - portfolio_day_gain
+    day_pct = (portfolio_day_gain / prev_val * 100) if prev_val else 0
+    total_gain = portfolio_value - total_cost
+    total_gain_pct = (total_gain / total_cost * 100) if total_cost else 0
+
+    alert_summary = []
+    for a in active_alerts:
+        q = quote_map.get(a.ticker) or get_quote(a.ticker, ttl=TTL_QUOTE_FAST)
+        if q:
+            alert_summary.append({
+                'id': a.id,
+                'ticker': a.ticker,
+                'target_price': round(a.target_price, 2),
+                'direction': a.direction,
+                'current_price': q['price'],
+            })
+    triggered_alerts = evaluate_price_alerts(current_user.id, quote_map=quote_map)
+
+    return jsonify({
+        'summary': {
+            'indices': indices,
+            'portfolio_value': round(portfolio_value, 2),
+            'portfolio_day_gain': round(portfolio_day_gain, 2),
+            'portfolio_day_gain_pct': round(day_pct, 2),
+            'position_count': len(positions),
+            'watchlist_count': len(watchlist_items),
+            'total_gain': round(total_gain, 2),
+            'total_gain_pct': round(total_gain_pct, 2),
+            'active_alert_count': len(alert_summary),
+        },
+        'sectors': sectors,
+        'movers': movers,
+        'portfolio': {'positions': portfolio_rows},
+        'watchlist': watchlist_rows,
+        'alerts': {'active': alert_summary[:8], 'triggered': triggered_alerts[:8]},
+    })
+
+
+@app.route('/api/search')
+@login_required
+@rate_limit('api_search', limit=80, window_seconds=60)
+def api_search():
+    q_raw = request.args.get('q', '').strip()
+    q_upper = q_raw.upper()
+    if not q_upper:
+        return jsonify([])
+    if len(q_raw) > 40:
+        return jsonify({'error': 'Query too long'}), 400
+    cached = cache_get(f'search:{q_upper}', TTL_QUOTE_MEDIUM)
+    if cached is not None:
+        return jsonify(cached)
+    tickers = set(POPULAR_TICKERS)
+    for item in WatchlistItem.query.filter_by(user_id=current_user.id).all():
+        tickers.add(item.ticker)
+    for item in Position.query.filter_by(user_id=current_user.id).all():
+        tickers.add(item.ticker)
+    safe_query_ticker = _normalize_ticker(q_upper)
+    if safe_query_ticker:
+        tickers.add(safe_query_ticker)
+
+    suggestions = get_symbol_suggestions(q_raw, limit=15)
+    for item in suggestions:
+        tickers.add(item['ticker'])
+
+    quote_map = get_quotes_map(list(tickers), ttl=TTL_QUOTE_FAST)
+    results_by_ticker: dict[str, dict] = {}
+    q_lower = q_raw.lower()
+
+    def add_result(ticker: str, name: str, price=None, change_pct=None, sector='', exchange=''):
+        t_low = ticker.lower()
+        n_low = name.lower()
+        score = 0
+
+        if t_low == q_lower:
+            score += 120
+        elif t_low.startswith(q_lower):
+            score += 90
+        elif q_lower in t_low:
+            score += 60
+
+        if n_low.startswith(q_lower):
+            score += 80
+        elif q_lower in n_low:
+            score += 45
+
+        if score <= 0:
+            return
+
+        existing = results_by_ticker.get(ticker)
+        candidate = {
+            'ticker': ticker,
+            'name': name or ticker,
+            'price': price,
+            'change_pct': change_pct,
+            'sector': sector,
+            'exchange': exchange,
+            'score': score,
+        }
+        has_price = candidate['price'] is not None
+        existing_has_price = existing is not None and existing.get('price') is not None
+        if (
+            existing is None
+            or candidate['score'] > existing['score']
+            or (candidate['score'] == existing['score'] and has_price and not existing_has_price)
+        ):
+            results_by_ticker[ticker] = candidate
+
+    for q in quote_map.values():
+        add_result(
+            ticker=q['ticker'],
+            name=(q.get('name') or '').strip() or q['ticker'],
+            price=q.get('price'),
+            change_pct=q.get('change_pct'),
+            sector=q.get('sector', ''),
+            exchange=q.get('exchange', ''),
+        )
+
+    for item in suggestions:
+        ticker = item['ticker']
+        if ticker in quote_map:
+            continue
+        add_result(
+            ticker=ticker,
+            name=item.get('name') or ticker,
+            price=None,
+            change_pct=None,
+            sector='',
+            exchange=item.get('exchange', ''),
+        )
+
+    results = list(results_by_ticker.values())
+    results.sort(key=lambda r: (-r['score'], r['ticker']))
+    ranked = [{k: v for k, v in item.items() if k != 'score'} for item in results[:15]]
+    cache_set(f'search:{q_upper}', ranked)
+    return jsonify(ranked)
+
+
+@app.route('/api/trades/data')
+@login_required
+@rate_limit('api_trades', limit=60, window_seconds=60)
+def api_trades_data():
+    trade_list = Trade.query.filter_by(user_id=current_user.id).order_by(
+        Trade.created_at.desc()
+    ).all()
+    rows = []
+    for t in trade_list:
+        rows.append({
+            'id': t.id,
+            'ticker': t.ticker,
+            'side': t.side,
+            'shares': t.shares,
+            'price': round(t.price, 2),
+            'total_value': round(t.shares * t.price, 2),
+            'realized_pnl': round(t.realized_pnl, 2) if t.realized_pnl is not None else None,
+            'created_at': t.created_at.strftime('%Y-%m-%d %H:%M'),
+        })
+    total_realized_pnl = sum(
+        r['realized_pnl'] for r in rows if r['realized_pnl'] is not None
+    )
+    sell_trades_asc = sorted(
+        [t for t in trade_list if t.side == 'SELL'],
+        key=lambda x: x.created_at,
+    )
+    cumulative: list[dict] = []
+    running = 0.0
+    for t in sell_trades_asc:
+        if t.realized_pnl is not None:
+            running += t.realized_pnl
+            cumulative.append({
+                'date': t.created_at.strftime('%Y-%m-%d'),
+                'cumulative_pnl': round(running, 2),
+            })
+    return jsonify({
+        'trades': rows,
+        'summary': {
+            'total_trades': len(rows),
+            'buy_count': sum(1 for r in rows if r['side'] == 'BUY'),
+            'sell_count': sum(1 for r in rows if r['side'] == 'SELL'),
+            'total_realized_pnl': round(total_realized_pnl, 2),
+            'total_invested': round(sum(r['total_value'] for r in rows if r['side'] == 'BUY'), 2),
+            'total_proceeds': round(sum(r['total_value'] for r in rows if r['side'] == 'SELL'), 2),
+        },
+        'cumulative_pnl': cumulative,
+    })
+
+
+@app.route('/api/alerts/data')
+@login_required
+@rate_limit('api_alerts', limit=60, window_seconds=60)
+def api_alerts_data():
+    alerts = PriceAlert.query.filter_by(user_id=current_user.id).order_by(
+        PriceAlert.is_active.desc(), PriceAlert.created_at.desc()
+    ).all()
+    quote_map = get_quotes_map([a.ticker for a in alerts], ttl=TTL_QUOTE_FAST)
+    triggered = evaluate_price_alerts(current_user.id, quote_map=quote_map)
+    rows = []
+    for a in alerts:
+        q = quote_map.get(a.ticker)
+        rows.append({
+            'id': a.id,
+            'ticker': a.ticker,
+            'target_price': round(a.target_price, 2),
+            'direction': a.direction,
+            'is_active': a.is_active,
+            'current_price': q['price'] if q else None,
+            'created_at': a.created_at.strftime('%Y-%m-%d'),
+            'triggered_at': a.triggered_at.strftime('%Y-%m-%d %H:%M:%S') if a.triggered_at else None,
+        })
+    return jsonify({'alerts': rows, 'triggered_alerts': triggered})
+
+
+# ── Init ───────────────────────────────────────────────────────────────────────
+with app.app_context():
+    db.create_all()
+
+if __name__ == '__main__':
+    app.run(debug=_debug_mode, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))

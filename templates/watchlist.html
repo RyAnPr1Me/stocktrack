@@ -1,0 +1,298 @@
+{% extends "base.html" %}
+{% block title %}Watchlist — StockTrack{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Watchlist</h1>
+    <p class="page-sub">Monitor stocks you're tracking</p>
+  </div>
+  <button class="btn btn-primary btn-sm" onclick="openModal('addWatchModal')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         width="16" height="16">
+      <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+    </svg>
+    Add Stock
+  </button>
+</div>
+
+<div class="card compact-card">
+  <div class="table-toolbar">
+    <div class="table-toolbar-group">
+      <label for="watchSearch">Search watchlist</label>
+      <input id="watchSearch" class="toolbar-input" type="search" placeholder="Ticker or company" />
+    </div>
+    <div class="table-toolbar-group">
+      <label for="watchSort">Sort by</label>
+      <select id="watchSort" class="toolbar-select">
+        <option value="change_desc">% change (high → low)</option>
+        <option value="volume_desc">Volume (high → low)</option>
+        <option value="name_asc">Name (A → Z)</option>
+        <option value="ticker_asc">Ticker (A → Z)</option>
+      </select>
+    </div>
+    <label class="toolbar-check">
+      <input id="watchAlertsOnly" type="checkbox" />
+      Alerts only
+    </label>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2 class="card-title">Tracked Stocks</h2>
+    <span class="card-meta" id="watchCount"></span>
+  </div>
+  <div class="table-wrap">
+    <table class="data-table" id="watchTable">
+      <thead>
+        <tr>
+          <th>Ticker</th>
+          <th>Company</th>
+          <th class="num">Price</th>
+          <th class="num">Change</th>
+          <th class="num">% Change</th>
+          <th class="num">Volume</th>
+          <th class="num">Market Cap</th>
+          <th class="num">52W Range</th>
+          <th class="num">P/E</th>
+          <th class="num">Alerts</th>
+          <th class="num">Added</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="watchBody">
+        <tr><td colspan="12" class="loading-cell">Loading watchlist…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Add to Watchlist Modal -->
+<div class="modal-backdrop" id="addWatchModal"
+     onclick="if(event.target===this)closeModal('addWatchModal')">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Add to Watchlist</h2>
+      <button class="modal-close" onclick="closeModal('addWatchModal')">×</button>
+    </div>
+    <form method="post" action="{{ url_for('add_watchlist') }}" class="modal-form">
+      <div class="form-group">
+        <label>Ticker Symbol</label>
+        <input type="text" name="ticker" placeholder="e.g. TSLA"
+               style="text-transform:uppercase" autofocus required />
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" onclick="closeModal('addWatchModal')">
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-primary">Add to Watchlist</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="addAlertModal"
+     onclick="if(event.target===this)closeModal('addAlertModal')">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Add Price Alert</h2>
+      <button class="modal-close" onclick="closeModal('addAlertModal')">×</button>
+    </div>
+    <form method="post" action="{{ url_for('add_alert') }}" class="modal-form">
+      <input type="hidden" name="next" value="{{ url_for('watchlist') }}" />
+      <div class="form-group">
+        <label>Ticker</label>
+        <input type="text" name="ticker" id="alertTickerInput" required />
+      </div>
+      <div class="form-row-2">
+        <div class="form-group">
+          <label>Direction</label>
+          <select name="direction" id="alertDirectionInput" required>
+            <option value="above">Above</option>
+            <option value="below">Below</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Target Price</label>
+          <input type="number" name="target_price" id="alertPriceInput" step="0.01" min="0.01" required />
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" onclick="closeModal('addAlertModal')">Cancel</button>
+        <button type="submit" class="btn btn-primary">Create Alert</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let watchlistData = [];
+
+async function loadWatchlist() {
+  const payload = await fetch('/api/watchlist/data').then(r => r.json());
+  watchlistData = payload.items || [];
+  renderTriggeredAlerts(payload.triggered_alerts || []);
+  applyWatchlistView();
+}
+
+function renderTriggeredAlerts(triggered) {
+  document.querySelectorAll('.watch-triggered-flash').forEach(el => el.remove());
+  if (!triggered.length) return;
+  const preview = triggered.slice(0, 3);
+  const summary = preview.map(a => `${a.ticker} (${a.direction} $${fmtNum(a.target_price)})`).join(', ');
+  const suffix = triggered.length > preview.length ? `, and ${triggered.length - preview.length} more` : '';
+  const container = document.createElement('div');
+  container.className = 'flash info watch-triggered-flash';
+  container.textContent = `Triggered alerts: ${summary}${suffix}`;
+  document.querySelector('.page-header')?.after(container);
+  setTimeout(() => container.remove(), 5000);
+}
+
+function applyWatchlistView() {
+  const query = (document.getElementById('watchSearch')?.value || '').trim().toLowerCase();
+  const sortBy = document.getElementById('watchSort')?.value || 'change_desc';
+  const alertsOnly = !!document.getElementById('watchAlertsOnly')?.checked;
+  let data = [...watchlistData];
+
+  if (query) {
+    data = data.filter(w =>
+      w.ticker.toLowerCase().includes(query) ||
+      (w.name || '').toLowerCase().includes(query)
+    );
+  }
+  if (alertsOnly) {
+    data = data.filter(w => (w.alerts || []).length > 0);
+  }
+
+  data.sort((a, b) => {
+    if (sortBy === 'volume_desc') return (b.volume || 0) - (a.volume || 0);
+    if (sortBy === 'name_asc') return (a.name || '').localeCompare(b.name || '');
+    if (sortBy === 'ticker_asc') return (a.ticker || '').localeCompare(b.ticker || '');
+    return (b.change_pct || 0) - (a.change_pct || 0);
+  });
+
+  renderWatchlistTable(data);
+}
+
+function renderWatchlistTable(data) {
+  const body = document.getElementById('watchBody');
+  document.getElementById('watchCount').textContent =
+    data.length + ' stock' + (data.length !== 1 ? 's' : '');
+
+  if (!data.length) {
+    const hasQuery = (document.getElementById('watchSearch')?.value || '').trim().length > 0
+      || !!document.getElementById('watchAlertsOnly')?.checked;
+    body.innerHTML = `<tr><td colspan="12" class="empty-cell">
+      ${hasQuery
+        ? 'No matching stocks. <a href="#" onclick="resetWatchFilters();return false;">Clear filters</a>'
+        : 'Your watchlist is empty. <a href="#" onclick="openModal(\'addWatchModal\');return false;">Add a stock</a>'}
+    </td></tr>`;
+    return;
+  }
+
+  body.innerHTML = '';
+  const chunks = [];
+  for (let i = 0; i < data.length; i += 20) chunks.push(data.slice(i, i + 20));
+  renderRowsInChunks(chunks, body, rows => rows.map(w => {
+    const rangeBar = w.week_52_low && w.week_52_high ? `
+      <div class="range-bar-wrap">
+        <span class="range-val">$${fmtNum(w.week_52_low)}</span>
+        <div class="range-track">
+          <div class="range-fill"
+               style="width:${Math.min(100,((w.price - w.week_52_low)/(w.week_52_high - w.week_52_low)*100).toFixed(1))}%">
+          </div>
+        </div>
+        <span class="range-val">$${fmtNum(w.week_52_high)}</span>
+      </div>
+    ` : '<span class="text-muted">N/A</span>';
+
+    return `
+      <tr>
+        <td><a href="/stock/${w.ticker}" class="ticker-link">${w.ticker}</a></td>
+        <td class="name-cell">${truncate(w.name, 26)}</td>
+        <td class="num">$${fmtNum(w.price)}</td>
+        <td class="num ${w.change >= 0 ? 'text-green' : 'text-red'}">
+          ${w.change >= 0 ? '+' : ''}$${fmtNum(Math.abs(w.change))}
+        </td>
+        <td class="num">
+          <span class="badge ${w.change_pct >= 0 ? 'badge-up' : 'badge-down'}">
+            ${fmtPct(w.change_pct)}
+          </span>
+        </td>
+        <td class="num">${w.volume ? fmtVolume(w.volume) : '—'}</td>
+        <td class="num">${fmtCap(w.market_cap)}</td>
+        <td class="num">${rangeBar}</td>
+        <td class="num">${w.pe_ratio ? w.pe_ratio.toFixed(1) : '—'}</td>
+        <td class="num">
+          ${renderAlertCell(w)}
+        </td>
+        <td class="num date-cell">${w.added_at}</td>
+        <td>
+          <button type="button" class="btn btn-ghost btn-xs" onclick="openAlertModal('${w.ticker}', ${w.price})">Alert</button>
+          <form method="post" action="/watchlist/remove/${w.id}"
+                onsubmit="return confirm('Remove ${w.ticker} from watchlist?')">
+            <button type="submit" class="btn-icon btn-danger-ghost" title="Remove">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" width="15" height="15">
+                <line x1="18" y1="6" x2="6" y2="18"/>
+                <line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+          </form>
+        </td>
+      </tr>
+    `;
+  }).join(''));
+}
+
+function renderAlertCell(w) {
+  const alerts = w.alerts || [];
+  if (!alerts.length) return '<span class="text-muted">—</span>';
+  return alerts.map(a => `<span class="badge ${a.direction === 'above' ? 'badge-up' : 'badge-down'}">${a.direction} $${fmtNum(a.target_price)}</span>`).join('<br/>');
+}
+
+function openAlertModal(ticker, price) {
+  document.getElementById('alertTickerInput').value = ticker || '';
+  document.getElementById('alertPriceInput').value = price ? Number(price).toFixed(2) : '';
+  document.getElementById('alertDirectionInput').value = 'above';
+  openModal('addAlertModal');
+}
+
+function renderRowsInChunks(chunks, body, renderFn, index = 0) {
+  if (index >= chunks.length) return;
+  body.insertAdjacentHTML('beforeend', renderFn(chunks[index]));
+  requestAnimationFrame(() => renderRowsInChunks(chunks, body, renderFn, index + 1));
+}
+
+function resetWatchFilters() {
+  document.getElementById('watchSearch').value = '';
+  document.getElementById('watchAlertsOnly').checked = false;
+  document.getElementById('watchSort').value = 'change_desc';
+  applyWatchlistView();
+}
+
+function fmtVolume(v) {
+  if (!v) return '—';
+  if (v >= 1e9) return (v/1e9).toFixed(1) + 'B';
+  if (v >= 1e6) return (v/1e6).toFixed(1) + 'M';
+  if (v >= 1e3) return (v/1e3).toFixed(0) + 'K';
+  return v.toLocaleString();
+}
+
+function fmtCap(v) {
+  if (!v) return '—';
+  if (v >= 1e12) return '$' + (v/1e12).toFixed(2) + 'T';
+  if (v >= 1e9) return '$' + (v/1e9).toFixed(1) + 'B';
+  if (v >= 1e6) return '$' + (v/1e6).toFixed(0) + 'M';
+  return '$' + v.toLocaleString();
+}
+
+loadWatchlist();
+document.getElementById('watchSearch')?.addEventListener('input', applyWatchlistView);
+document.getElementById('watchSort')?.addEventListener('change', applyWatchlistView);
+document.getElementById('watchAlertsOnly')?.addEventListener('change', applyWatchlistView);
+</script>
+{% endblock %}

@@ -1,0 +1,67 @@
+{% extends "auth_base.html" %}
+{% block title %}Create Account — StockTrack{% endblock %}
+
+{% block content %}
+<div class="auth-card">
+  <div class="auth-card-header">
+    <h1>Create your account</h1>
+    <p>Start tracking your investments for free</p>
+  </div>
+
+  <form method="post" class="auth-form">
+    <div class="form-group">
+      <label for="username">Username</label>
+      <input type="text" id="username" name="username"
+             placeholder="Choose a username (min 3 chars)"
+             autocomplete="username" minlength="3" required />
+    </div>
+    <div class="form-group">
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email"
+             placeholder="your@email.com"
+             autocomplete="email" required />
+    </div>
+    <div class="form-group">
+      <label for="password">Password</label>
+      <div class="input-wrap">
+        <input type="password" id="password" name="password"
+               placeholder="At least 8 characters"
+               autocomplete="new-password" minlength="8" required />
+        <button type="button" class="input-toggle-pw" onclick="togglePw('password')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <div class="form-group">
+      <label for="confirm_password">Confirm Password</label>
+      <div class="input-wrap">
+        <input type="password" id="confirm_password" name="confirm_password"
+               placeholder="Repeat your password"
+               autocomplete="new-password" minlength="8" required />
+        <button type="button" class="input-toggle-pw" onclick="togglePw('confirm_password')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <button type="submit" class="btn btn-primary btn-full">Create Account</button>
+  </form>
+
+  <div class="auth-footer">
+    Already have an account?
+    <a href="{{ url_for('login') }}">Sign in</a>
+  </div>
+</div>
+
+<script>
+function togglePw(id) {
+  const el = document.getElementById(id);
+  el.type = el.type === 'password' ? 'text' : 'password';
+}
+</script>
+{% endblock %}

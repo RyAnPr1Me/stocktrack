@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+{% block title %}Markets — StockTrack{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Markets</h1>
+    <p class="page-sub" id="mktUpdated">Loading market data…</p>
+  </div>
+  <button class="btn btn-ghost btn-sm" onclick="loadMarket()">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         width="16" height="16">
+      <polyline points="23 4 23 10 17 10"/>
+      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+    </svg>
+    Refresh
+  </button>
+</div>
+
+<!-- Indices -->
+<div class="card">
+  <div class="card-header"><h2 class="card-title">Major Indices</h2></div>
+  <div class="indices-cards" id="indicesCards">
+    <div class="idx-card skeleton-card"></div>
+    <div class="idx-card skeleton-card"></div>
+    <div class="idx-card skeleton-card"></div>
+    <div class="idx-card skeleton-card"></div>
+    <div class="idx-card skeleton-card"></div>
+  </div>
+</div>
+
+<!-- Sectors -->
+<div class="card">
+  <div class="card-header"><h2 class="card-title">Sector Performance (Today)</h2></div>
+  <div id="sectorGrid" class="sector-grid loading-placeholder">Loading…</div>
+</div>
+
+<!-- Movers -->
+<div class="section-row">
+  <div class="section-half">
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">
+          <span class="badge-dot badge-green"></span> Top Gainers
+        </h2>
+        <span class="card-meta">Large-cap leaders</span>
+      </div>
+      <div id="gainersTable" class="loading-placeholder">Loading…</div>
+    </div>
+  </div>
+  <div class="section-half">
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">
+          <span class="badge-dot badge-red"></span> Top Losers
+        </h2>
+        <span class="card-meta">Large-cap laggards</span>
+      </div>
+      <div id="losersTable" class="loading-placeholder">Loading…</div>
+    </div>
+  </div>
+</div>
+
+<!-- Sector chart -->
+<div class="card">
+  <div class="card-header"><h2 class="card-title">Sector Comparison Chart</h2></div>
+  <div class="chart-container-md">
+    <canvas id="sectorChart"></canvas>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let sectorChart = null;
+
+async function loadMarket() {
+  const [indices, sectors, movers] = await Promise.all([
+    fetch('/api/market/indices').then(r => r.json()),
+    fetch('/api/market/sectors').then(r => r.json()),
+    fetch('/api/market/movers').then(r => r.json()),
+  ]);
+
+  renderIndexCards(indices);
+  renderSectorGrid(sectors);
+  renderSectorChart(sectors);
+  renderMoversTable(movers.gainers, 'gainersTable');
+  renderMoversTable(movers.losers, 'losersTable');
+  document.getElementById('mktUpdated').textContent =
+    'Last updated ' + new Date().toLocaleTimeString();
+}
+
+function renderIndexCards(indices) {
+  const el = document.getElementById('indicesCards');
+  el.innerHTML = indices.map(i => `
+    <div class="idx-card">
+      <div class="idx-name">${i.name}</div>
+      <div class="idx-price">$${fmtNum(i.price)}</div>
+      <div class="idx-change ${i.change_pct >= 0 ? 'up' : 'down'}">
+        ${i.change >= 0 ? '+' : ''}$${fmtNum(Math.abs(i.change))}
+        (${fmtPct(i.change_pct)})
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderSectorGrid(sectors) {
+  const el = document.getElementById('sectorGrid');
+  el.innerHTML = sectors.map(s => `
+    <div class="sector-tile ${s.change_pct >= 0 ? 'tile-up' : 'tile-down'}">
+      <div class="tile-name">${s.name}</div>
+      <div class="tile-ticker">${s.ticker}</div>
+      <div class="tile-pct">${fmtPct(s.change_pct)}</div>
+      <div class="tile-price">$${fmtNum(s.price)}</div>
+    </div>
+  `).join('');
+}
+
+function renderSectorChart(sectors) {
+  const ctx = document.getElementById('sectorChart').getContext('2d');
+  if (sectorChart) sectorChart.destroy();
+  const colors = sectors.map(s => s.change_pct >= 0 ? 'rgba(16,185,129,0.75)' : 'rgba(239,68,68,0.75)');
+  sectorChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: sectors.map(s => s.name),
+      datasets: [{
+        data: sectors.map(s => s.change_pct),
+        backgroundColor: colors,
+        borderRadius: 4,
+        borderSkipped: false,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      indexAxis: 'y',
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: { label: ctx => ` ${fmtPct(ctx.raw)}` }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: 'rgba(255,255,255,0.04)' },
+          ticks: { color: '#64748b', callback: v => fmtPct(v) }
+        },
+        y: {
+          grid: { display: false },
+          ticks: { color: '#94a3b8', font: { size: 12 } }
+        }
+      },
+      animation: { duration: 500 },
+    }
+  });
+}
+
+function renderMoversTable(movers, elId) {
+  const el = document.getElementById(elId);
+  el.innerHTML = `
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Ticker</th>
+          <th>Company</th>
+          <th class="num">Price</th>
+          <th class="num">Change</th>
+          <th class="num">Volume</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${movers.map(m => `
+          <tr>
+            <td><a href="/stock/${m.ticker}" class="ticker-link">${m.ticker}</a></td>
+            <td class="name-cell">${truncate(m.name, 24)}</td>
+            <td class="num">$${fmtNum(m.price)}</td>
+            <td class="num">
+              <span class="badge ${m.change_pct >= 0 ? 'badge-up' : 'badge-down'}">
+                ${fmtPct(m.change_pct)}
+              </span>
+            </td>
+            <td class="num">${m.volume ? (m.volume/1e6).toFixed(1)+'M' : '—'}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+loadMarket();
+</script>
+{% endblock %}

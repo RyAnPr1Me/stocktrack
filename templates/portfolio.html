@@ -1,0 +1,430 @@
+{% extends "base.html" %}
+{% block title %}Portfolio — StockTrack{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Portfolio</h1>
+    <p class="page-sub">Track your holdings, P&amp;L, and asset allocation</p>
+  </div>
+  <button class="btn btn-primary btn-sm" onclick="openModal('addPositionModal')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         width="16" height="16">
+      <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+    </svg>
+    Add Position
+  </button>
+</div>
+
+<!-- Summary stats -->
+<div class="stats-grid" id="portfolioStats">
+  <div class="stat-card skeleton-card"></div>
+  <div class="stat-card skeleton-card"></div>
+  <div class="stat-card skeleton-card"></div>
+  <div class="stat-card skeleton-card"></div>
+</div>
+
+<div class="card compact-card">
+  <div class="table-toolbar">
+    <div class="table-toolbar-group">
+      <label for="portfolioSearch">Search holdings</label>
+      <input id="portfolioSearch" class="toolbar-input" type="search" placeholder="Ticker, company, or note" />
+    </div>
+    <div class="table-toolbar-group">
+      <label for="portfolioSort">Sort by</label>
+      <select id="portfolioSort" class="toolbar-select">
+        <option value="value_desc">Market value (high → low)</option>
+        <option value="gain_desc">Gain % (high → low)</option>
+        <option value="day_desc">Day gain (high → low)</option>
+        <option value="ticker_asc">Ticker (A → Z)</option>
+      </select>
+    </div>
+  </div>
+</div>
+
+<!-- Charts + Table -->
+<div class="section-row">
+  <div style="flex:0 0 280px">
+    <div class="card">
+      <div class="alloc-tabs">
+        <button class="alloc-tab active" id="tabTicker" onclick="switchAllocTab('ticker')">By Ticker</button>
+        <button class="alloc-tab" id="tabSector" onclick="switchAllocTab('sector')">By Sector</button>
+      </div>
+      <div class="card-header" style="padding-top:10px">
+        <h2 class="card-title" id="allocTitle">Allocation</h2>
+      </div>
+      <div class="chart-container-sm">
+        <canvas id="allocationChart"></canvas>
+      </div>
+      <div id="allocationLegend" class="donut-legend"></div>
+    </div>
+  </div>
+  <div style="flex:1">
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">Holdings</h2>
+        <span class="card-meta" id="holdingsCount"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table" id="holdingsTable">
+          <thead>
+            <tr>
+              <th>Ticker</th>
+              <th>Company</th>
+              <th class="num">Shares</th>
+              <th class="num">Avg Cost</th>
+              <th class="num">Price</th>
+              <th class="num">Mkt Value</th>
+              <th class="num">Weight</th>
+              <th class="num">Gain / Loss</th>
+              <th class="num">Day</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="holdingsBody">
+            <tr><td colspan="10" class="loading-cell">Loading positions…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Add Position Modal -->
+<div class="modal-backdrop" id="addPositionModal" onclick="if(event.target===this)closeModal('addPositionModal')">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Add Position</h2>
+      <button class="modal-close" onclick="closeModal('addPositionModal')">×</button>
+    </div>
+    <form method="post" action="{{ url_for('add_position') }}" class="modal-form">
+      <div class="form-group">
+        <label>Ticker Symbol</label>
+        <input type="text" name="ticker" placeholder="e.g. AAPL"
+               style="text-transform:uppercase" required />
+      </div>
+      <div class="form-row-2">
+        <div class="form-group">
+          <label>Shares</label>
+          <input type="number" name="shares" placeholder="e.g. 10"
+                 step="0.0001" min="0.0001" required />
+        </div>
+        <div class="form-group">
+          <label>Avg Cost / Share ($)</label>
+          <input type="number" name="avg_cost" placeholder="e.g. 150.00"
+                 step="0.01" min="0.01" required />
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Notes <span class="form-opt">(optional)</span></label>
+        <input type="text" name="notes" placeholder="e.g. Long-term hold" maxlength="500" />
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" onclick="closeModal('addPositionModal')">
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-primary">Add to Portfolio</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="sellPositionModal" onclick="if(event.target===this)closeModal('sellPositionModal')">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Record Sale</h2>
+      <button class="modal-close" onclick="closeModal('sellPositionModal')">×</button>
+    </div>
+    <form method="post" id="sellForm" class="modal-form">
+      <div class="form-group">
+        <label>Ticker</label>
+        <input type="text" id="sellTicker" disabled />
+      </div>
+      <div class="form-row-2">
+        <div class="form-group">
+          <label>Shares to Sell</label>
+          <input type="number" name="shares" id="sellShares" step="0.0001" min="0.0001" required />
+        </div>
+        <div class="form-group">
+          <label>Sale Price</label>
+          <input type="number" name="price" id="sellPrice" step="0.01" min="0.01" required />
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" onclick="closeModal('sellPositionModal')">Cancel</button>
+        <button type="submit" class="btn btn-primary">Record Sale</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let allocationChart = null;
+let portfolioData = [];
+let sectorData = [];
+let activeAllocTab = 'ticker';
+
+async function loadPortfolio() {
+  const data = await fetch('/api/portfolio/data').then(r => r.json());
+  portfolioData = data.positions || [];
+  sectorData = data.sector_breakdown || [];
+  renderStats(data);
+  applyPortfolioView();
+}
+
+function renderStats(d) {
+  const analytics = d.analytics || {};
+  const dayGain = analytics.day_gain || 0;
+  const dayPct = analytics.day_gain_pct || 0;
+  const el = document.getElementById('portfolioStats');
+  el.innerHTML = `
+    <div class="stat-card">
+      <div class="stat-label">Total Value</div>
+      <div class="stat-value">$${fmtNum(d.total_value)}</div>
+      <div class="stat-change neutral">Market value</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Cost Basis</div>
+      <div class="stat-value">$${fmtNum(d.total_cost)}</div>
+      <div class="stat-change neutral">Total invested</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Unrealized Return</div>
+      <div class="stat-value ${d.total_gain >= 0 ? 'text-green' : 'text-red'}">
+        ${d.total_gain >= 0 ? '+' : ''}$${fmtNum(Math.abs(d.total_gain))}
+      </div>
+      <div class="stat-change ${d.total_gain >= 0 ? 'up' : 'down'}">
+        ${fmtPct(d.total_gain_pct)} unrealized
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Realized P&amp;L</div>
+      <div class="stat-value ${(analytics.realized_gain || 0) >= 0 ? 'text-green' : 'text-red'}">
+        ${(analytics.realized_gain || 0) >= 0 ? '+' : ''}$${fmtNum(Math.abs(analytics.realized_gain || 0))}
+      </div>
+      <div class="stat-change ${dayGain >= 0 ? 'up' : 'down'}">
+        ${fmtPct(dayPct)} today · total $${fmtNum(analytics.total_return || 0)}
+      </div>
+    </div>
+  `;
+}
+
+function renderTable(positions) {
+  const body = document.getElementById('holdingsBody');
+  document.getElementById('holdingsCount').textContent =
+    positions.length + ' position' + (positions.length !== 1 ? 's' : '');
+  if (!positions.length) {
+    const hasQuery = (document.getElementById('portfolioSearch')?.value || '').trim().length > 0;
+    body.innerHTML = `<tr><td colspan="10" class="empty-cell">
+      ${hasQuery ? 'No matching positions. <a href="#" onclick="document.getElementById(\'portfolioSearch\').value=\'\';applyPortfolioView();return false;">Clear filters</a>'
+      : 'No positions yet. <a href="#" onclick="openModal(\'addPositionModal\');return false;">Add one</a>'}
+    </td></tr>`;
+    return;
+  }
+  body.innerHTML = '';
+  const chunks = [];
+  for (let i = 0; i < positions.length; i += 20) chunks.push(positions.slice(i, i + 20));
+  renderRowsInChunks(chunks, body, rows => rows.map(p => `
+    <tr>
+      <td><a href="/stock/${p.ticker}" class="ticker-link">${p.ticker}</a></td>
+      <td class="name-cell">
+        <div>${truncate(p.name, 24)}</div>
+        ${p.notes ? `<div class="table-note" title="${escapeHtml(p.notes)}">${escapeHtml(truncate(p.notes, 42))}</div>` : ''}
+      </td>
+      <td class="num">${p.shares % 1 ? p.shares.toFixed(4) : p.shares}</td>
+      <td class="num">$${p.avg_cost.toFixed(2)}</td>
+      <td class="num">$${fmtNum(p.current_price)}</td>
+      <td class="num">$${fmtNum(p.market_value)}</td>
+      <td class="num">${fmtPct(p.contribution_pct || 0)}</td>
+      <td class="num">
+        <span class="${p.gain >= 0 ? 'text-green' : 'text-red'}">
+          ${p.gain >= 0 ? '+' : ''}$${fmtNum(Math.abs(p.gain))}
+        </span>
+        <br/>
+        <small class="${p.gain_pct >= 0 ? 'text-green' : 'text-red'}">
+          ${fmtPct(p.gain_pct)} · ${fmtPct(p.gain_contribution_pct || 0)} contrib
+        </small>
+      </td>
+      <td class="num">
+        <span class="${p.day_gain >= 0 ? 'text-green' : 'text-red'}">
+          ${p.day_gain >= 0 ? '+' : ''}$${fmtNum(Math.abs(p.day_gain))}
+        </span>
+      </td>
+      <td>
+        <button type="button" class="btn btn-ghost btn-xs" onclick="openSellModal(${p.id}, '${p.ticker}', ${p.shares}, ${p.current_price})">Sell</button>
+        <form method="post" action="/portfolio/remove/${p.id}"
+              onsubmit="return confirm('Remove ${p.ticker} from portfolio?')">
+          <button type="submit" class="btn-icon btn-danger-ghost" title="Remove">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+              <path d="M10 11v6M14 11v6"/>
+            </svg>
+          </button>
+        </form>
+      </td>
+    </tr>
+  `).join(''));
+}
+
+function escapeHtml(str) {
+  return (str || '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  })[c]);
+}
+
+function applyPortfolioView() {
+  const query = (document.getElementById('portfolioSearch')?.value || '').trim().toLowerCase();
+  const sortBy = document.getElementById('portfolioSort')?.value || 'value_desc';
+  let rows = [...portfolioData];
+
+  if (query) {
+    rows = rows.filter(p =>
+      p.ticker.toLowerCase().includes(query) ||
+      (p.name || '').toLowerCase().includes(query) ||
+      (p.notes || '').toLowerCase().includes(query)
+    );
+  }
+
+  rows.sort((a, b) => {
+    if (sortBy === 'gain_desc') return (b.gain_pct || 0) - (a.gain_pct || 0);
+    if (sortBy === 'day_desc') return (b.day_gain || 0) - (a.day_gain || 0);
+    if (sortBy === 'ticker_asc') return (a.ticker || '').localeCompare(b.ticker || '');
+    return (b.market_value || 0) - (a.market_value || 0);
+  });
+
+  renderTable(rows);
+  if (activeAllocTab === 'sector') {
+    renderSectorAllocation();
+  } else {
+    renderAllocation(rows);
+  }
+}
+
+function switchAllocTab(tab) {
+  activeAllocTab = tab;
+  document.getElementById('tabTicker').classList.toggle('active', tab === 'ticker');
+  document.getElementById('tabSector').classList.toggle('active', tab === 'sector');
+  if (tab === 'sector') {
+    document.getElementById('allocTitle').textContent = 'Sector Allocation';
+    renderSectorAllocation();
+  } else {
+    document.getElementById('allocTitle').textContent = 'Allocation';
+    const query = (document.getElementById('portfolioSearch')?.value || '').trim().toLowerCase();
+    let rows = [...portfolioData];
+    if (query) rows = rows.filter(p =>
+      p.ticker.toLowerCase().includes(query) ||
+      (p.name || '').toLowerCase().includes(query)
+    );
+    renderAllocation(rows);
+  }
+}
+
+function renderSectorAllocation() {
+  const legend = document.getElementById('allocationLegend');
+  if (!sectorData.length) {
+    legend.innerHTML = '<p class="empty" style="padding:1rem">No sector data</p>';
+    return;
+  }
+  const total = sectorData.reduce((s, d) => s + d.value, 0);
+  const colors = ['#6366f1','#06b6d4','#10b981','#f59e0b','#ef4444',
+                  '#8b5cf6','#ec4899','#14b8a6','#f97316','#84cc16'];
+  const labels = sectorData.map(d => d.sector);
+  const values = sectorData.map(d => d.value);
+
+  if (allocationChart) allocationChart.destroy();
+  allocationChart = new Chart(document.getElementById('allocationChart'), {
+    type: 'doughnut',
+    data: {
+      labels,
+      datasets: [{ data: values, backgroundColor: colors.slice(0, sectorData.length),
+                   borderWidth: 2, borderColor: '#151521' }],
+    },
+    options: {
+      cutout: '70%',
+      plugins: { legend: { display: false }, tooltip: {
+        callbacks: {
+          label: ctx => ` ${ctx.label}: $${fmtNum(ctx.raw)} (${(ctx.raw/total*100).toFixed(1)}%)`
+        }
+      }},
+      animation: { duration: 600 },
+    }
+  });
+
+  legend.innerHTML = sectorData.map((d, i) => `
+    <div class="legend-row">
+      <span class="legend-dot" style="background:${colors[i % colors.length]}"></span>
+      <span class="legend-label">${d.sector}</span>
+      <span class="legend-val">${(d.value / total * 100).toFixed(1)}%</span>
+    </div>
+  `).join('');
+}
+
+function renderRowsInChunks(chunks, body, renderFn, index = 0) {
+  if (index >= chunks.length) return;
+  body.insertAdjacentHTML('beforeend', renderFn(chunks[index]));
+  requestAnimationFrame(() => renderRowsInChunks(chunks, body, renderFn, index + 1));
+}
+
+function openSellModal(positionId, ticker, maxShares, currentPrice) {
+  const form = document.getElementById('sellForm');
+  form.action = `/portfolio/sell/${positionId}`;
+  document.getElementById('sellTicker').value = ticker;
+  const sharesInput = document.getElementById('sellShares');
+  sharesInput.value = '';
+  sharesInput.max = maxShares;
+  document.getElementById('sellPrice').value = Number(currentPrice).toFixed(2);
+  openModal('sellPositionModal');
+}
+
+function renderAllocation(positions) {
+  const legend = document.getElementById('allocationLegend');
+  if (!positions.length) {
+    legend.innerHTML = '<p class="empty" style="padding:1rem">No positions</p>';
+    return;
+  }
+  const total = positions.reduce((s, p) => s + p.market_value, 0);
+  const colors = ['#6366f1','#06b6d4','#10b981','#f59e0b','#ef4444',
+                  '#8b5cf6','#ec4899','#14b8a6','#f97316','#84cc16'];
+  const labels = positions.map(p => p.ticker);
+  const values = positions.map(p => p.market_value);
+
+  if (allocationChart) allocationChart.destroy();
+  allocationChart = new Chart(document.getElementById('allocationChart'), {
+    type: 'doughnut',
+    data: {
+      labels,
+      datasets: [{ data: values, backgroundColor: colors.slice(0, positions.length),
+                   borderWidth: 2, borderColor: '#151521' }],
+    },
+    options: {
+      cutout: '70%',
+      plugins: { legend: { display: false }, tooltip: {
+        callbacks: {
+          label: ctx => ` ${ctx.label}: $${fmtNum(ctx.raw)} (${(ctx.raw/total*100).toFixed(1)}%)`
+        }
+      }},
+      animation: { duration: 600 },
+    }
+  });
+
+  legend.innerHTML = positions.slice(0, 10).map((p, i) => `
+    <div class="legend-row">
+      <span class="legend-dot" style="background:${colors[i % colors.length]}"></span>
+      <span class="legend-label">${p.ticker}</span>
+      <span class="legend-val">${(p.market_value / total * 100).toFixed(1)}%</span>
+    </div>
+  `).join('');
+}
+
+loadPortfolio();
+document.getElementById('portfolioSearch')?.addEventListener('input', applyPortfolioView);
+document.getElementById('portfolioSort')?.addEventListener('change', applyPortfolioView);
+</script>
+{% endblock %}
